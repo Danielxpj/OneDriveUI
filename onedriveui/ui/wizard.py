@@ -322,9 +322,18 @@ class SetupWizard(QWidget):
         report.units_installed = self._install_units(report)
         report.icons_installed, report.extension_installed = \
             self._install_integration(report)
-        report.autostart_set = self._set_autostart(report)
         report.mount_started = self._start_mount(report)
 
+        # Autostart **last**, and only if everything else worked. It used to run
+        # before `_start_mount`, so a setup that failed at the final step still
+        # installed a login unit — leaving a client that starts at every boot
+        # and has nothing to sync. An unusable install that reappears on every
+        # login is worse than one that simply did not finish.
+        if report.errors:
+            log.warning("setup did not complete: %s", "; ".join(report.errors))
+            return report
+
+        report.autostart_set = self._set_autostart(report)
         if report.ok:
             self._mark_complete(report)
         else:

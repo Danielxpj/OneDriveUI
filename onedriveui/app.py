@@ -508,6 +508,11 @@ def _wire_ipc(ipc: Any, account: AccountInfo, filestate: Any,
                     "will show no emblems and its menu will do nothing")
 
 
+#: The rclone remote name first-run setup creates. One name, because the
+#: wizard configures exactly one account and every later account is added
+#: through Settings.
+WIZARD_REMOTE: Final[str] = "onedrive"
+
 #: The one Nautilus server for this process. Created on first use.
 _IPC: Any = None
 
@@ -1053,12 +1058,71 @@ class Application:
         wizard = SetupWizard(None, config=self.config, services=services)
         self._windows["__wizard__"] = wizard
 
-        def done(_report: Any) -> None:
+        # Sign-in. `sign_in_requested` was emitted by the wizard's own button
+        # and connected by nothing, and no production code anywhere wrote an
+        # account into `config.json` — so the wizard could not produce the one
+        # thing it exists to produce. These two halves are that path.
+        from onedriveui.models import RcEndpoint
+        from onedriveui.rc.auth import AuthFlow
+        from onedriveui.rc.client import RcClient
+
+        rcd = services["rcd"]
+        rcd_client = RcClient(RcEndpoint(kind="rcd", host="127.0.0.1", port=0),
+                              parent=wizard)
+        auth = AuthFlow(rcd_client, parent=wizard)
+        # Parented to the wizard on purpose: `AuthFlow` polls every 250 ms and
+        # `RcClient` owns a QNetworkAccessManager, and a bare QObject dropped
+        # mid-flight is the lifetime bug this rewire has already hit twice.
+        services["auth"] = auth
+
+        def sign_in() -> None:
+            try:
+                rcd.ensure_running()
+                endpoint = rcd.endpoint()
+                if endpoint is not None and getattr(endpoint, "port", 0):
+                    rcd_client.set_endpoint(endpoint)
+                auth.start(WIZARD_REMOTE)
+            except Exception:  # noqa: BLE001 - reported, never a crash
+                log.exception("could not start sign-in")
+                BUS.auth_finished.emit(False, "could not start sign-in")
+
+        def signed_in(ok: bool, message: str) -> None:
+            """Record the remote rclone just created as this client's account."""
+            if not ok:
+                log.warning("sign-in did not complete: %s", message)
+                return
+            try:
+                account = config.AccountConfig(id=WIZARD_REMOTE,
+                                               remote=WIZARD_REMOTE)
+                account.sync_root = str(paths.default_sync_root())
+                self.config.accounts = [
+                    a for a in self.config.accounts if a.id != account.id
+                ] + [account]
+                self.config.app.active_account_id = account.id
+                config.save(self.config, emit=False)
+                wizard.account = account.to_account_info()
+                log.info("signed in; %s is now configured", account.id)
+            except Exception:  # noqa: BLE001 - the user is told by the wizard
+                log.exception("could not record the new account")
+
+        wizard.sign_in_requested.connect(sign_in)
+        auth.finished.connect(signed_in)
+
+        def done(report: Any) -> None:
             self.config = config.load()
             self._windows.pop("__wizard__", None)
             wizard.close()
             if self.accounts():
                 self.start()
+                return
+            # Nothing was configured. Leaving the process alive would leave an
+            # invisible client holding the single-instance socket, so every
+            # later launcher click would be swallowed by a window that is not
+            # there. Say so and go.
+            errors = "; ".join(getattr(report, "errors", ()) or ())
+            log.error("setup finished without configuring an account%s",
+                      f": {errors}" if errors else "")
+            self.quit()
 
         wizard.finished.connect(done)
         wizard.show()

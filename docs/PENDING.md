@@ -200,6 +200,23 @@
 > `TERMINAL_RULES` ya protege el aborto por `--max-delete`, y PySide sí honra
 > la sustitución de un virtual por atributo de instancia.
 >
+> ### Lo que la verificación adversaria dejó abierto
+>
+> De los 12 hallazgos que sobrevivieron a la refutación, 11 ya estaban
+> corregidos antes del commit. El duodécimo —el asistente— estaba **mal
+> corregido por mí**: pasarle los servicios no bastaba, porque
+> `sign_in_requested` no lo escuchaba nadie y **ningún código de producción
+> escribía nunca una cuenta en `config.json`**. Y al cablearlo introduje un daño
+> nuevo: `finalize()` ponía el autoarranque en el paso 5, *antes* del paso 6 que
+> fallaba — así que una configuración fallida dejaba una entrada de inicio de
+> sesión que arrancaba un proceso invisible en cada arranque, y `done()`
+> descartaba el informe sin decir nada.
+>
+> Corregido: el autoarranque va al final y sólo si todo lo demás funcionó;
+> `sign_in_requested` llega a `AuthFlow` y la cuenta resultante se escribe en la
+> configuración; y una configuración que termina sin cuenta lo dice y **cierra**,
+> en vez de quedarse invisible reteniendo el socket de instancia única.
+>
 > **La suite no se ha ejecutado** desde estos cambios, por indicación expresa.
 > Hay que actualizarla: se borraron tres módulos (y `tests/test_kfm.py`), y
 > cambiaron la prueba de propiedad, la firma de `Config.get/set`, `_provision()`
