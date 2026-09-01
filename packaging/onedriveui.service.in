@@ -1,0 +1,34 @@
+# The GUI, for a distribution package. The application writes an equivalent unit
+# into ~/.config/systemd/user/ itself when the user turns autostart on; this is
+# the system-wide template a package installs into /usr/lib/systemd/user/.
+#
+# Two lines here are the ones that get written wrongly.
+#
+# There is NO After=network-online.target. That target DOES NOT EXIST in the
+# systemd --user manager: After= and Wants= on it are silently ignored, so a unit
+# that names it looks correct, reviews correctly, and orders nothing at all. The
+# application waits for the network itself, through Gio.NetworkMonitor.
+#
+# PartOf=graphical-session.target is what makes the client stop at logout rather
+# than lingering with a mount nobody is looking at.
+
+[Unit]
+Description=OneDriveUI
+Documentation=https://github.com/Danielxpj/OneDriveUI
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=@BINDIR@/onedriveui
+# The tray icon is the whole UI: a crash that leaves no icon leaves no way back
+# in, so it always restarts.
+Restart=always
+RestartSec=5
+# Long enough that a repeated crash is not a fork bomb, short enough that a
+# transient failure at login does not need a manual restart.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Install]
+WantedBy=graphical-session.target

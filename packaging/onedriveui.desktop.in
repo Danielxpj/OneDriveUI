@@ -1,0 +1,41 @@
+# Installed to ~/.local/share/applications/ by `platform/desktop.py`, which
+# generates an equivalent file at runtime; this is the packaged template.
+#
+# MimeType registers the `odopen:` scheme, which is how "Open in OneDrive" links
+# from the web reach a desktop client. Without it the browser offers nothing and
+# the link appears broken.
+#
+# Every Exec= below must correspond to a real flag in `__main__.py`.
+# `desktop-file-validate` does NOT check that, so a stale action here is a menu
+# item that silently does nothing.
+
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=OneDrive
+GenericName=Cloud file sync
+Comment=Keep your OneDrive files in sync
+Exec=@BINDIR@/onedriveui %U
+TryExec=@BINDIR@/onedriveui
+Icon=onedriveui
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=onedrive;cloud;sync;rclone;microsoft;backup;
+StartupNotify=true
+StartupWMClass=onedriveui
+SingleMainWindow=true
+X-GNOME-UsesNotifications=true
+MimeType=x-scheme-handler/odopen;
+Actions=OpenFolder;Pause;Settings;
+
+[Desktop Action OpenFolder]
+Name=Open your OneDrive folder
+Exec=@BINDIR@/onedriveui --open-folder
+
+[Desktop Action Pause]
+Name=Pause syncing
+Exec=@BINDIR@/onedriveui --pause
+
+[Desktop Action Settings]
+Name=Settings
+Exec=@BINDIR@/onedriveui --settings

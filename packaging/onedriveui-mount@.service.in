@@ -1,0 +1,43 @@
+# One instance per account: `onedriveui-mount@onedrive.service`. %i is the
+# account id.
+#
+# INVARIANT I1: no --onedrive-* flag may ever appear on this command line.
+# rclone hashes the set of command-line backend overrides into the filesystem's
+# canonical name, so a single one turns `onedrive:` into `onedrive{MxOuf}:` — a
+# DIFFERENT VFS cache directory. Every file the user had materialised instantly
+# becomes online-only, and the old cache tree is stranded on disk forever. This
+# machine is carrying two such orphans right now, from exactly that mistake.
+# Backend options belong in rclone.conf. `rc/guards.assert_no_backend_flags()`
+# refuses to emit one, and `build_argv()` calls it on its own output.
+#
+# ExecStop is `fusermount3 -uz`, lazy, because a mount with an open file handle
+# cannot be unmounted otherwise and systemd would sit through its whole timeout
+# before killing rclone with the mount still in the table.
+
+[Unit]
+Description=OneDriveUI mount for %i
+Documentation=https://rclone.org/commands/rclone_mount/
+PartOf=graphical-session.target
+After=graphical-session-pre.target
+
+[Service]
+Type=notify
+ExecStartPre=/usr/bin/mkdir -p @SYNCROOT@
+ExecStart=@RCLONE@ mount %i: @SYNCROOT@ \
+    --config @RCLONECONF@ \
+    --rc --rc-addr 127.0.0.1:@PORT@ \
+    --rc-user @RCUSER@ --rc-pass @RCPASS@ \
+    --vfs-cache-mode full \
+    --user-agent 'ISV|OneDriveUI|OneDriveUI/@VERSION@' \
+    --use-json-log --color NEVER --log-level INFO --stats 0
+ExecStop=/usr/bin/fusermount3 -uz @SYNCROOT@
+Restart=on-failure
+RestartSec=10
+# The restart ladder (10 s / 30 s / 2 m / 10 m, three per hour) is enforced by
+# `rc/mountd.py`, not here: it has to refuse while an upload is in flight
+# (invariant I3), and systemd cannot know that.
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,97 @@
+# Two build decisions here are not preferences, and getting either wrong
+# produces a build that looks fine and is broken at runtime.
+#
+# 1. THE BACKEND IS setuptools. hatchling is not installed on this machine, and
+#    naming it would make every build fetch it from PyPI — turning an offline
+#    build into a network operation and pinning the toolchain to whatever
+#    happened to be current that day.
+#
+# 2. PySide6 IS NOT A DEPENDENCY. It is deliberately absent from `dependencies`
+#    below. The system PySide6 (pacman: pyside6) is compiled against the system
+#    Qt; a PyPI wheel ships its own Qt, and installing one *shadows* the system
+#    build. The symptoms are not import errors — they are a QSystemTrayIcon that
+#    registers no StatusNotifierItem and a QtDBus that behaves subtly
+#    differently, both of which look like application bugs.
+#
+#    So the venv is created with system site packages:
+#
+#        python3 -m venv --system-site-packages .venv
+#        .venv/bin/pip install -e .
+#
+#    A `pip install onedriveui` into a bare venv is not supported, and says so.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "onedriveui"
+version = "0.1.0"
+description = "A OneDrive client for Linux, built on rclone"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Daniel Dughman" }]
+keywords = ["onedrive", "rclone", "sync", "cloud", "gnome", "nautilus"]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: File Sharing",
+    "Topic :: System :: Archiving :: Backup",
+]
+
+# Everything this needs that pip can honestly provide. The three that matter
+# most are NOT here, because pip cannot install them correctly:
+#   * PySide6      - see the note at the top of this file
+#   * PyGObject    - the same problem: it must match the system GLib/GTK
+#   * rclone       - a Go binary, installed by the distribution
+# `onedriveui --doctor` checks for all three at runtime and says what is missing.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+onedriveui = "onedriveui.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/Danielxpj/OneDriveUI"
+
+[tool.setuptools.packages.find]
+include = ["onedriveui*"]
+exclude = ["tests*", "docs*", "scripts*"]
+
+[tool.setuptools.package-data]
+# `schema.sql` is read at runtime by `data/db.py`, and the migrations beside it
+# are how an existing database is brought forward. A wheel without them installs
+# an application that cannot open its own database.
+"onedriveui.data" = ["schema.sql", "migrations/*.sql"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    # The codebase deliberately catches broad exceptions at the boundaries where
+    # one failing subsystem must not take the tick, the menu or the file
+    # manager's UI thread down with it. Every such site names the reason.
+    "BLE001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert on long, literal strings from `strings.py`; wrapping them would
+# make the assertion harder to read than the line length saves.
+"tests/*" = ["E501"]
+
+# NOTE: pytest is configured in `pytest.ini`, not here. Both would be legal and
+# `pytest.ini` wins, so a `[tool.pytest.ini_options]` section in this file would
+# be dead configuration that silently drifts away from the one that is read.

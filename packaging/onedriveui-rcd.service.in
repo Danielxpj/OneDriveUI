@@ -1,0 +1,33 @@
+# The rclone control plane: the daemon that runs jobs and answers `operations/*`.
+# Separate from the mount daemon on purpose — the mount has the VFS and moves the
+# bytes, this one runs the work, and a restart of either must not disturb the
+# other.
+#
+# The port is written in at install time from the 17800-17899 range. It is NEVER
+# 5572, 5573 or 53682: the first two are already occupied on this machine by the
+# user's own rclone, and binding one would either fail or, worse, adopt a daemon
+# that is not ours. The ownership proof in rc/daemon.py exists for exactly that
+# case.
+
+[Unit]
+Description=OneDriveUI rclone control plane
+Documentation=https://rclone.org/rc/
+PartOf=graphical-session.target
+After=graphical-session-pre.target
+
+[Service]
+Type=simple
+ExecStart=@RCLONE@ rcd \
+    --rc-addr 127.0.0.1:@PORT@ \
+    --rc-user @RCUSER@ \
+    --rc-pass @RCPASS@ \
+    --rc-job-expire-duration 10m \
+    --rc-job-expire-interval 30s \
+    --rc-server-write-timeout 1h \
+    --user-agent 'ISV|OneDriveUI|OneDriveUI/@VERSION@' \
+    --use-json-log --color NEVER --log-level INFO --stats 0
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
