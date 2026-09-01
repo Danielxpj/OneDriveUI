@@ -1,4 +1,4 @@
-"""The four Settings sections, with Microsoft's own names.
+"""The Settings sections: Microsoft's four, plus the one they cannot have.
 
 "Sync and back up", "Account", "Notifications", "About" — the same four, in the
 same order, because a user who has used the Windows client should not have to
@@ -21,15 +21,23 @@ from __future__ import annotations
 from onedriveui.ui.pages.page_about import AboutPage
 from onedriveui.ui.pages.page_account import AccountPage
 from onedriveui.ui.pages.page_notifications import NotificationsPage
+from onedriveui.ui.pages.page_rclone import RclonePage
 from onedriveui.ui.pages.page_sync import SyncPage
 
-__all__ = ["SyncPage", "AccountPage", "NotificationsPage", "AboutPage", "PAGES"]
+__all__ = ["SyncPage", "AccountPage", "NotificationsPage", "RclonePage",
+           "AboutPage", "PAGES"]
 
-#: The four sections, in Microsoft's order. The settings window builds its
-#: navigation from this, so adding a page is one entry rather than three edits.
+#: The sections, in Microsoft's order, with "rclone engine" last before About.
+#: The settings window builds its navigation from this, so adding a page is one
+#: entry rather than three edits.
+#:
+#: `rclone` is ours and sits where it does deliberately: a user looking for the
+#: familiar Windows settings finds them first and in the expected order, and the
+#: engine underneath is one click further down rather than in front of them.
 PAGES = (
     ("sync", SyncPage),
     ("account", AccountPage),
     ("notifications", NotificationsPage),
+    ("rclone", RclonePage),
     ("about", AboutPage),
 )

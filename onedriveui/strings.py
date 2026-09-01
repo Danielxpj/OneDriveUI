@@ -99,6 +99,11 @@ class SETTINGS:
     NAV_ACCOUNT       = "Account"                              # [verbatim]
     NAV_NOTIFICATIONS = "Notifications"                        # [verbatim]
     NAV_ABOUT         = "About"                                # [verbatim]
+    #: [ours] Not a Microsoft section — Microsoft has no rclone to configure.
+    #: This client is a control surface for rclone, and until this page existed
+    #: not one of the twenty-eight mount parameters it writes could be changed
+    #: without hand-editing config.json.
+    NAV_RCLONE        = "rclone engine"                        # [ours]
 
     MANAGE_BACKUP     = "Manage folder backup"                 # [verbatim]
     BACKUP_DESC       = "Back up your important PC folders to OneDrive"          # [approx]
@@ -112,6 +117,63 @@ class SETTINGS:
     CAMERA_IMPORT     = "Save photos and videos from devices to OneDrive"        # [verbatim]
 
     ADVANCED          = "Advanced settings"                    # [verbatim]
+
+    # ── the rclone engine page ───────────────────────────────────────────────
+    # All [ours]: these name rclone's own flags, so they deliberately read like
+    # rclone's documentation rather than like Microsoft's UI. A user tuning a
+    # mount is a user who will search rclone's manual for these words.
+    RC_INTRO          = "These settings become the rclone command line. Changes marked below need the mount to restart before they take effect."
+    RC_ENGINE         = "rclone binary"
+    RC_ENGINE_DESC    = "Which rclone this client drives"
+    RC_CACHE          = "VFS cache"
+    RC_CACHE_DESC     = "How much of your drive is kept on this device"
+    RC_CACHE_DIR      = "Cache directory"
+    RC_CACHE_MAX_SIZE = "Maximum cache size (GB)"
+    RC_CACHE_MAX_AGE  = "Discard cached files unused for (hours)"
+    RC_CACHE_MIN_FREE = "Always leave free on disk (GB)"
+    RC_WRITE_BACK     = "Upload a changed file after (seconds)"
+    RC_FRESHNESS      = "Freshness"
+    RC_FRESHNESS_DESC = "How quickly a change made elsewhere shows up here"
+    RC_DIR_CACHE      = "Remember directory listings for (seconds)"
+    RC_POLL           = "Check the cloud for changes every (seconds)"
+    RC_ATTR_TIMEOUT   = "Cache file attributes for (milliseconds)"
+    RC_TRANSFERS      = "Transfers"
+    RC_TRANSFERS_DESC = "How hard this client pushes the network and the API"
+    RC_N_TRANSFERS    = "Parallel transfers"
+    RC_N_CHECKERS     = "Parallel checkers"
+    RC_TPSLIMIT       = "API requests per second"
+    RC_TPS_BURST      = "Request burst allowance"
+    RC_RETRIES        = "Retries"
+    RC_LOW_RETRIES    = "Low-level retries"
+    RC_READS          = "Reads"
+    RC_READS_DESC     = "How a file is fetched when you open it"
+    RC_CHUNK          = "Read chunk size (MB)"
+    RC_CHUNK_LIMIT    = "Read chunk size limit (MB)"
+    RC_FILES          = "Files and permissions"
+    RC_FILES_DESC     = "How the mounted files appear on this device"
+    RC_UMASK          = "umask"
+    RC_FILE_PERMS     = "File permissions"
+    RC_DIR_PERMS      = "Directory permissions"
+    RC_ALLOW_OTHER    = "Let other users on this machine read the mount"
+    RC_LINKS          = "Translate symbolic links"
+    RC_FAST_FINGER    = "Fast fingerprint (skip hashing to detect changes)"
+    RC_BACKEND        = "Backend options"
+    RC_BACKEND_DESC   = "Written into rclone.conf, never onto the command line — a backend flag on the command line renames the filesystem and orphans the cache."
+    RC_CHUNK_UPLOAD   = "Upload chunk size"
+    RC_BACKEND_APPLY  = "Write to rclone.conf"
+    RC_BACKEND_OK     = "Written to rclone.conf."
+
+    RC_EXTRA          = "Extra rclone arguments"
+    RC_EXTRA_DESC     = "Passed through verbatim, one per line. Backend flags are refused: they change the filesystem name and orphan the cache."
+    RC_LOG            = "Engine log"
+    RC_LOG_DESC       = "What rclone and this client are doing, live"
+    RC_LOG_OPEN       = "Open the full log"
+
+    RC_COMMAND        = "The command this produces"
+    RC_COMMAND_DESC   = "Exactly what will be run when the mount next starts"
+    RC_APPLY          = "Restart the mount to apply"
+    RC_PENDING        = "Saved. The mount is still running with the previous settings."
+    RC_RESTARTING     = "Restarting the mount…"
     FILE_COLLAB       = "File collaboration"                   # [verbatim]
     COLLAB_ASK        = "Let me choose to merge changes or keep both copies"     # [verbatim]
     COLLAB_KEEP_BOTH  = "Always keep both copies (rename the copy on this computer)"  # [verbatim]

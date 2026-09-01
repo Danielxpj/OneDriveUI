@@ -505,6 +505,9 @@ class AuthFlow(QObject):
         #: queueing another request behind it.
         self._oauth_in_flight = False
         self._job_in_flight = False
+        #: The outstanding `config/oauthstatus`, so the latch above can tell
+        #: "still running" from "aborted and will never answer".
+        self._oauth_call: Any = None
         self._oauth_timer = QTimer(self)
         self._oauth_timer.setInterval(self._poll_ms)
         self._oauth_timer.timeout.connect(self._poll_oauth)
@@ -705,10 +708,17 @@ class AuthFlow(QObject):
         if not self._running or self._auth_url:
             self._oauth_timer.stop()
             return
+        # The same abort hole the pollers had: `RcCall.abort()` emits nothing,
+        # so a request cancelled by a client teardown or an endpoint change
+        # would leave this latched and the sign-in stuck with no error.
         if self._oauth_in_flight:
-            return
+            call = getattr(self, "_oauth_call", None)
+            if call is not None and not call.delivered:
+                return
+            self._oauth_in_flight = False
         self._oauth_in_flight = True
         call = self._client.call("config/oauthstatus", {})
+        self._oauth_call = call
         call.succeeded.connect(self._on_oauth_status)
         call.failed.connect(self._on_oauth_status_failed)
 

@@ -46,8 +46,6 @@ class EventBus(QObject):
     pin_progress            = Signal(str, int, int)          # rel_path, done, total
 
     # ── runs ─────────────────────────────────────────────────────────────────
-    run_started             = Signal(RunRecord)
-    run_finished            = Signal(RunRecord)
 
     # ── processes ────────────────────────────────────────────────────────────
     daemon_health           = Signal(str, DaemonHealth)      # "rcd" | "mount", health
@@ -74,7 +72,6 @@ class EventBus(QObject):
 
     # ── misc ─────────────────────────────────────────────────────────────────
     log_line                = Signal(str)
-    vault_state_changed     = Signal(VaultState)
 
 
 #: The singleton. Import this, never construct another EventBus.
@@ -91,13 +88,12 @@ SIGNAL_NAMES: tuple[str, ...] = (
     "issue_raised", "issue_resolved", "conflict_detected",
     "decision_required", "decision_answered",
     "file_state_changed", "file_states_invalidated", "pin_progress",
-    "run_started", "run_finished",
     "daemon_health", "daemon_restarted", "mount_health",
     "account_added", "account_updated", "account_removed",
     "auth_url_ready", "auth_finished",
     "pause_changed", "bandwidth_changed", "config_changed", "theme_changed",
     "toast_requested", "notification_action", "ipc_action_requested",
-    "log_line", "vault_state_changed",
+    "log_line",
 )
 
 __all__ = ["BUS", "EventBus", "SIGNAL_NAMES"]

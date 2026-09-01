@@ -129,7 +129,11 @@ def rcd_rc(monkeypatch):
 def _ours(port: int, *, pid: int = 4242) -> list[str]:
     return ["/usr/bin/rclone", "rcd", "--rc-addr", f"127.0.0.1:{port}",
             "--rc-user", "onedriveui", "--rc-pass", "x",
-            "--rc-job-expire-duration", "10m"]
+            "--rc-job-expire-duration", "10m",
+            # Every command line this client writes carries it, and the proof
+            # now requires it: it is what tells "systemd restarted our unit"
+            # apart from "a stranger bound our port".
+            "--user-agent", USER_AGENT]
 
 
 def _foreign_mount(port: int) -> list[str]:
@@ -253,7 +257,7 @@ class TestVerifyOwnership:
             self, rcd_rc, fake_proc):
         port = rcd_rc.endpoint.port
         fake_proc(rcd_rc.pid, _foreign_mount(port)[:4] + [
-            "--rc-addr", f"127.0.0.1:{port}"])
+            "--rc-addr", f"127.0.0.1:{port}", "--user-agent", USER_AGENT])
         mount_ep = RcEndpoint(kind="mount", host="127.0.0.1", port=port,
                               mountpoint="/home/u/OneDrive", account_id="onedrive")
         assert RcdSupervisor.verify_ownership(mount_ep) is True
@@ -480,7 +484,11 @@ class TestEnsureRunning:
         supervisor = RcdSupervisor(systemd, startup_grace_s=1.0)
         ep = supervisor.ensure_running()
 
-        assert systemd.verbs == ["write_unit", "daemon_reload", "enable", "start"]
+        # `restart`, not `start`: provisioning writes a new port and new
+        # credentials, and a `start` on an already-active unit would leave the
+        # previous launch running on the previous port.
+        assert systemd.verbs == ["write_unit", "daemon_reload", "enable",
+                                 "restart"]
         assert UNIT_RCD in systemd.units
         assert f"--rc-addr 127.0.0.1:{port}" in systemd.units[UNIT_RCD]
         assert ep.port == port

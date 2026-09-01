@@ -528,9 +528,20 @@ class FactCollector(QObject):
                 overridden = bool(checker(reason))
             intent = PauseIntent(reason=reason, until=until_iso,
                                  overridden=overridden)
-            policy_getter = getattr(self._pause, "policy", None)
+            # `policy_pause`, not `policy`. The probe used to look for a
+            # method PauseManager does not have, so this always fell through
+            # with `policy = NONE`: the "Pause on metered connection" and
+            # "Pause on battery saver" switches in Settings were saved,
+            # displayed, and never once consulted. The environment has to come
+            # from the power policy, because the pause manager owns the user's
+            # preference and not the machine's condition.
+            policy_getter = getattr(self._pause, "policy_pause", None)
             if callable(policy_getter):
-                policy = policy_getter()
+                metered = battery = False
+                if self._power is not None:
+                    metered = bool(self._power.metered())
+                    battery = bool(self._power.power_saver())
+                policy = policy_getter(metered=metered, battery=battery)
         elif self._power is not None:
             throttle, reason = self._power.should_throttle()
             policy = reason if throttle else PauseReason.NONE

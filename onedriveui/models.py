@@ -261,6 +261,12 @@ class RecoveryAction(StrEnum):
     OPEN_WEB             = "open_web"
     SHOW_IN_FOLDER       = "show_in_folder"
     STOP_SYNCING_ITEM    = "stop_syncing_item"
+    # The two verbs the Nautilus extension has always offered ("Always keep on
+    # this device" / "Free up space"). FREE_UP_SPACE existed; its opposite did
+    # not, so the extension's own menu could not be served through `do()` —
+    # which is the only way anything in this client is allowed to change.
+    PIN                  = "pin"
+    UNPIN                = "unpin"
 
 
 class DecisionKind(StrEnum):

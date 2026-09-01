@@ -111,18 +111,10 @@ def _wizard() -> Any:
     return SetupWizard(_account(), config=_config(), services=_stub_services())
 
 
-def _filebrowser() -> Any:
-    from onedriveui.ui.filebrowser import FileBrowser
-
-    services = _stub_services()
-    return FileBrowser(_account(), supervisor=services["supervisor"])
-
-
 WINDOWS: dict[str, Callable[[], Any]] = {
     "settings": _settings,
     "activity": _activity,
     "wizard": _wizard,
-    "filebrowser": _filebrowser,
 }
 
 

@@ -51,6 +51,7 @@ NAV_ITEMS: Final[tuple[tuple[str, str, str], ...]] = (
     ("sync", SETTINGS.NAV_SYNC, "nav_sync"),
     ("account", SETTINGS.NAV_ACCOUNT, "nav_account"),
     ("notifications", SETTINGS.NAV_NOTIFICATIONS, "nav_notifications"),
+    ("rclone", SETTINGS.NAV_RCLONE, "nav_rclone"),
     ("about", SETTINGS.NAV_ABOUT, "nav_about"),
 )
 

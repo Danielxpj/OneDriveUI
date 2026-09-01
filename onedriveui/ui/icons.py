@@ -143,7 +143,7 @@ GLYPHS: dict[str, str] = {
     # settings nav and cards
     "chevron_left": "chevron_left", "nav_sync": "cloud_sync",
     "nav_account": "person_circle", "nav_notifications": "alert",
-    "nav_about": "info", "advanced": "options", "help": "question_circle",
+    "nav_about": "info", "nav_rclone": "options", "advanced": "options", "help": "question_circle",
     "bug": "bug", "reset": "arrow_reset", "resync": "arrow_repeat_all",
     "add": "add", "add_account": "person_add", "remove": "subtract",
     "unlink": "plug_disconnected", "connected": "plug_connected",

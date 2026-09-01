@@ -115,7 +115,6 @@ class AppSection:
     keep_tray_icon_when_stopped: bool = True
     first_run_complete: bool = False
     active_account_id: str | None = None
-    show_filebrowser: bool = True
     locale: str = "system"
 
 
@@ -545,7 +544,8 @@ class AppConfig:
                     return entry
         return self.accounts[0]
 
-    def get(self, dotted: str, default: Any = None) -> Any:
+    def get(self, dotted: str, default: Any = None, *,
+            account_id: str | None = None) -> Any:
         """Read a value by its dotted key.
 
         Args:
@@ -554,22 +554,27 @@ class AppConfig:
                 top-level key such as ``"schema_version"``. Account keys resolve
                 against the active account.
             default: Returned when the key does not exist.
+            account_id: Which account an account-scoped key belongs to;
+                ``None`` means the active one.
 
         Returns:
             The stored value, or `default`.
         """
-        owner, name = self._resolve(dotted)
+        owner, name = self._resolve(dotted, account_id)
         if owner is None or not hasattr(owner, name):
             return default
         return getattr(owner, name)
 
-    def set(self, dotted: str, value: Any) -> bool:
+    def set(self, dotted: str, value: Any, *,
+            account_id: str | None = None) -> bool:
         """Write a value by its dotted key, coercing it to the field's type.
 
         Args:
             dotted: As :meth:`get`.
             value: The new value. Coerced the same way loading coerces, so a
                 string ``"4"`` from a line edit becomes the integer 4.
+            account_id: Which account an account-scoped key belongs to;
+                ``None`` means the active one.
 
         Returns:
             True when the stored value changed, False when the key is unknown
@@ -579,7 +584,7 @@ class AppConfig:
         Raises:
             ConfigError: If the value cannot be coerced to the field's type.
         """
-        owner, name = self._resolve(dotted)
+        owner, name = self._resolve(dotted, account_id)
         if owner is None or not hasattr(owner, name):
             return False
         hints = _hints_for(type(owner))
@@ -594,8 +599,17 @@ class AppConfig:
         setattr(owner, name, coerced)
         return True
 
-    def _resolve(self, dotted: str) -> tuple[Any, str]:
-        """Map a dotted key onto ``(owning object, field name)``."""
+    def _resolve(self, dotted: str, account_id: str | None = None) -> tuple[Any, str]:
+        """Map a dotted key onto ``(owning object, field name)``.
+
+        Args:
+            dotted: The key.
+            account_id: Which account an account-scoped key belongs to.
+                ``None`` keeps the historical behaviour — the active account —
+                which is right for the tray and wrong for a Settings window
+                opened on a *specific* account: with two accounts configured,
+                every edit landed on whichever one happened to be active.
+        """
         parts = str(dotted).split(".")
         if len(parts) == 1:
             return self, parts[0]
@@ -606,7 +620,7 @@ class AppConfig:
             return self.app, name
         if head == "advanced":
             return self.advanced, name
-        acc = self.account()
+        acc = self.account(account_id)
         if acc is None:
             return None, name
         if head == "account":
@@ -1111,6 +1125,16 @@ def _validate_paths(acc: AccountConfig, problems: list[str]) -> None:
             f"mount at {nested_in} (I2) — the sync root must BE a mountpoint, "
             "never live under one")
     if acc.offline_folder.enabled:
+        # There is no engine behind it any more. This client mounts the remote;
+        # the Topology-B "offline folder" kept a second, locally-materialised
+        # copy synchronised two-way with bisync, and that engine has been
+        # removed — it was never reachable from the UI, never wired into the
+        # composition root, and it is the one design that creates a second copy
+        # of the user's data on this machine. Refusing loudly is the honest
+        # alternative to a switch that is stored, validated and does nothing.
+        problems.append(
+            "offline_folder.enabled: this client has no two-way sync engine; "
+            "the mount at account.sync_root is the only copy it manages")
         offline = acc.resolved_offline_path()
         if offline == root or offline.is_relative_to(root) or root.is_relative_to(offline):
             problems.append(
@@ -1263,12 +1287,38 @@ def validate(cfg: AppConfig, *, raise_on_error: bool = True) -> list[str]:
     _validate_app(cfg, problems)
 
     seen: set[str] = set()
+    roots: dict[str, str] = {}
+    remotes: dict[str, str] = {}
     for acc in cfg.accounts:
         if not acc.id:
             problems.append("account.id: must not be empty")
         elif acc.id in seen:
             problems.append(f"account.id: {acc.id!r} appears more than once")
         seen.add(acc.id)
+
+        # Two mounts of one remote is the configuration that destroyed a real
+        # file on a real account: each mount keeps its own directory cache,
+        # neither knows about the other, and a rename made against a stale
+        # listing deletes the destination on the server before the move fails.
+        # Nothing here checked for it, and every `AccountConfig` defaults to the
+        # same `~/OneDrive`, so two accounts added without an explicit root
+        # collided by construction. It is refused at the config layer because
+        # that is the only place that sees every account at once.
+        if acc.enabled:
+            root = str(acc.resolved_sync_root())
+            if root in roots:
+                problems.append(
+                    f"account.sync_root: {acc.id!r} and {roots[root]!r} both "
+                    f"mount {root} — two mounts of one mountpoint")
+            roots[root] = acc.id
+
+            if acc.remote:
+                if acc.remote in remotes:
+                    problems.append(
+                        f"account.remote: {acc.id!r} and {remotes[acc.remote]!r} "
+                        f"both mount {acc.remote}: — two live mounts of one "
+                        f"remote cannot see each other's renames")
+                remotes[acc.remote] = acc.id
         if not acc.remote:
             problems.append("account.remote: must not be empty")
         elif ":" in acc.remote:
@@ -1327,6 +1377,13 @@ def clamp(cfg: AppConfig) -> list[str]:
              [RC_PORT_RANGE.start, RC_PORT_RANGE.stop - 1])
 
     for acc in cfg.accounts:
+        # There is no two-way sync engine any more, so this cannot be honoured.
+        # Clamped rather than only rejected: `validate()` runs on **save**, and
+        # a stored `true` that only `validate()` refused would make every future
+        # settings write fail while the config still loaded — the exact trap of
+        # "clamp cannot repair what validate rejects". Turning it off on load
+        # means the refusal in `validate()` only ever sees a hand-edit.
+        note("offline_folder.enabled", acc.offline_folder, "enabled", False)
         mount = acc.mount
         note("mount.transfers", mount, "transfers",
              min(max(1, mount.transfers), MAX_TRANSFERS))
@@ -1542,6 +1599,20 @@ def load(path: Path | str | None = None) -> AppConfig:
     return cfg
 
 
+def _is_json_object(raw: bytes) -> bool:
+    """Is this a JSON object? The bar for keeping a file as the backup.
+
+    Deliberately shallow: a settings file that parses is worth keeping even if
+    a value in it is out of range, because :func:`load` can clamp that. One
+    that does not parse is worth nothing, and promoting it would destroy the
+    last copy that does.
+    """
+    try:
+        return isinstance(json.loads(raw.decode("utf-8")), dict)
+    except (ValueError, UnicodeDecodeError):
+        return False
+
+
 def save(
     cfg: AppConfig,
     path: Path | str | None = None,
@@ -1582,7 +1653,11 @@ def save(
                     if isinstance(on_disk, dict) else None)
 
     payload = json.dumps(new, indent=2, ensure_ascii=False) + "\n"
-    backup_then_write(target, payload, mode=0o600)
+    # Only rotate a file that is itself valid JSON into `.bak`. Without this,
+    # the first save after recovering from a corrupt `config.json` copied that
+    # corrupt file straight over the good backup it had just been rescued by.
+    backup_then_write(target, payload, mode=0o600,
+                      keep_if=_is_json_object)
     _LAST_WRITTEN[key] = copy.deepcopy(new)
 
     if emit and previous is not None:

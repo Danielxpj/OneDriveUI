@@ -78,9 +78,16 @@ CREATE TABLE activity (
 CREATE INDEX        ix_activity_recent ON activity(account_id, started_at DESC);
 CREATE INDEX        ix_activity_path   ON activity(account_id, rel_path);
 CREATE UNIQUE INDEX ux_activity_dedupe ON activity(dedupe_key) WHERE dedupe_key IS NOT NULL;
-CREATE TRIGGER trg_activity_cap AFTER INSERT ON activity BEGIN
-  DELETE FROM activity WHERE account_id = NEW.account_id AND id NOT IN (
-    SELECT id FROM activity WHERE account_id = NEW.account_id ORDER BY id DESC LIMIT 5000);
+-- Swept every 500th insert, by primary-key range: an anti-join over 5 000 rows
+-- on every INSERT is not affordable now that completed transfers are drained
+-- into this table continuously. The exact per-account trim is
+-- `db.vacuum_and_prune()`, run hourly.
+CREATE TRIGGER trg_activity_cap AFTER INSERT ON activity
+WHEN NEW.id % 500 = 0
+BEGIN
+  DELETE FROM activity
+   WHERE account_id = NEW.account_id
+     AND id <= NEW.id - 5000;
 END;
 
 -- ─── writer: sync/issues.py ───────────────────────────────────────────────────

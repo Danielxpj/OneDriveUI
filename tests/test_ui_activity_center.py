@@ -245,6 +245,28 @@ def test_escape_dismisses_the_flyout(centre):
     assert not window.isVisible()
 
 
+def test_reopening_an_open_flyout_does_not_replay_the_entrance(centre,
+                                                                monkeypatch):
+    """The second "Open Activity Center" is a request to bring the window
+    forward. Fading in a window the user is already looking at reads as a
+    blink, not as an entrance."""
+    from onedriveui.ui import motion
+
+    fades: list[str] = []
+    monkeypatch.setattr(motion, "fade_in",
+                        lambda *a, **kw: fades.append("fade"))
+
+    window = centre()
+    window.open_()
+    QApplication.instance().processEvents()
+    assert fades == ["fade"]
+
+    window.open_()                       # already visible
+    QApplication.instance().processEvents()
+    assert fades == ["fade"]
+    assert window.isVisible()
+
+
 def test_open_places_the_window_inside_the_work_area(centre):
     window = centre()
     window.open_()

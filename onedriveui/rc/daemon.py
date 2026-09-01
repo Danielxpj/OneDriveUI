@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
 from PySide6.QtCore import QObject, Signal
 
@@ -59,6 +59,16 @@ __all__ = ["RcdSupervisor", "SystemdLike", "execute_id_of", "unit_escape"]
 log = logging.getLogger(__name__)
 
 #: How long to wait for `rc/noop` after `systemctl start`, and how often to poll.
+#: How long an ownership proof stays good. Short enough that a stranger taking
+#: the port is noticed within one user-visible beat, long enough that the tick
+#: is not paying for two blocking calls every two seconds.
+PROOF_TTL_S: Final[float] = 30.0
+
+#: The version-independent half of our user agent — `ISV|OneDriveUI|OneDriveUI/`.
+#: What the ownership proof matches, so an upgrade cannot orphan a running
+#: daemon started by the previous build.
+UA_PREFIX: Final[str] = USER_AGENT.rsplit("/", 1)[0] + "/"
+
 #: rclone binds its listener before it does any backend work, so it answers well
 #: inside a second; the budget exists for a cold page cache, not for the network.
 _POLL_INTERVAL_S = 0.1
@@ -166,6 +176,11 @@ class RcdSupervisor(QObject):
         #: the UI can say *why* nothing is working, instead of a bare "down".
         self._foreign: RcEndpoint | None = None
         self._health = DaemonHealth.DOWN
+        #: The cached ownership proof: which address it was taken against, when,
+        #: and the pid it found. See `_proven_owner`.
+        self._proof_key: tuple[str, int] | None = None
+        self._proof_at: float = 0.0
+        self._proof_pid: int = 0
         self._failures: list[float] = []
 
     # ── unit text ───────────────────────────────────────────────────────────
@@ -233,7 +248,28 @@ class RcdSupervisor(QObject):
 
     @staticmethod
     def verify_ownership(ep: RcEndpoint) -> bool:
-        """Is the daemon answering on ``ep`` provably the one we configured?
+        """Is the daemon answering on ``ep`` provably one of ours?
+
+        Thin wrapper over :meth:`observed_owner`, kept because "is this ours?"
+        is the question most callers are actually asking.
+
+        Args:
+            ep: The endpoint to prove.
+
+        Returns:
+            True if the proof holds.
+        """
+        return RcdSupervisor.observed_owner(ep) > 0
+
+    @staticmethod
+    def observed_owner(ep: RcEndpoint) -> int:
+        """The pid of the daemon answering on ``ep``, or ``0`` if unproven.
+
+        Returns the pid rather than a boolean so a caller can tell *which*
+        process answered without paying for a second ``core/pid`` round trip.
+        :meth:`health` needs exactly that: a proof that passes with a pid other
+        than the recorded one means systemd restarted our unit, which must be
+        re-stamped, not condemned.
 
         Args:
             ep: The endpoint to prove. ``ep.kind`` selects the second half of the
@@ -262,46 +298,72 @@ class RcdSupervisor(QObject):
             unreadable ``/proc`` all mean "not proven", which is the safe answer.
         """
         if not ep.port:
-            return False
+            return 0
         if int(ep.port) in RC_FORBIDDEN_PORTS:
             log.warning(
                 "endpoint %s claims forbidden port %d; refusing to prove "
                 "ownership — that port belongs to someone else",
                 ep.kind, ep.port)
-            return False
+            return 0
         try:
             pid = int(call_blocking(ep, "core/pid", {}, timeout_s=1.0).get("pid", 0))
         except (RcError, OSError, TypeError, ValueError):
-            return False
+            return 0
         if pid <= 0:
-            return False
+            return 0
 
         argv = read_proc_cmdline(pid)
         if not argv:
-            return False
+            return 0
         joined = " ".join(argv)
         if "--rc-addr" not in argv:
-            return False
+            return 0
         if f"{ep.host}:{ep.port}" not in joined:
-            return False
+            return 0
         if ep.kind == "rcd":
             if "rcd" not in argv:
                 log.warning(
                     "a daemon answers on %s but its argv is %r, not 'rcd'; it is "
                     "foreign and must never be driven", ep.base_url, argv[:3])
-                return False
+                return 0
         else:
             if not ep.mountpoint or str(ep.mountpoint) not in joined:
-                return False
+                return 0
 
-        if ep.starttime:
+        # Our own user agent is on every command line this client writes and on
+        # nobody else's. It is what separates "systemd restarted our unit" from
+        # "a stranger bound our port" once the pid has moved, and it is why the
+        # start-time check below can be narrowed to genuine pid reuse.
+        #
+        # The version-INDEPENDENT prefix, not the whole stamped string. The unit
+        # is `Restart=always` and `WantedBy=default.target`, so the running
+        # daemon keeps the command line it was started with across upgrades —
+        # matching `ISV|OneDriveUI|OneDriveUI/0.1.0` from a 0.2.0 build would
+        # condemn our own daemon as foreign the first time anyone upgraded, and
+        # the FOREIGN latch survives restarts.
+        if UA_PREFIX not in joined:
+            log.warning(
+                "a daemon answers on %s and looks like rclone, but its argv "
+                "carries no %s; it was not started by us",
+                ep.base_url, UA_PREFIX)
+            return 0
+
+        # Start time proves the pid was not recycled underneath us. That can
+        # only happen when the answering pid is the SAME one we recorded — or
+        # when we recorded no pid at all, in which case we cannot tell reuse
+        # from a restart and stay strict. A *different* pid that passed every
+        # check above is our own unit restarted (it carries `Restart=always`),
+        # and condemning that as foreign latched the client into a permanent red
+        # ERROR that survived restarts, because the stale start time was
+        # persisted and read back on the next launch.
+        if ep.starttime and (not ep.pid or pid == ep.pid):
             observed = read_proc_starttime(pid)
             if observed != ep.starttime:
                 log.warning(
                     "pid %d on %s has starttime %d, not the recorded %d; the pid "
                     "was recycled", pid, ep.base_url, observed, ep.starttime)
-                return False
-        return True
+                return 0
+        return pid
 
     @staticmethod
     def _identify(ep: RcEndpoint) -> RcEndpoint:
@@ -370,10 +432,23 @@ class RcdSupervisor(QObject):
         if ep is not None and ep.port:
             if not is_alive(ep, timeout_s=1.0):
                 return self._set_health(DaemonHealth.DOWN)
-            if not self.verify_ownership(ep):
+            pid = self._proven_owner(ep)
+            if not pid:
                 self._foreign = ep
                 self._endpoint = None
+                self._invalidate_proof()
                 return self._set_health(DaemonHealth.FOREIGN)
+            if ep.pid and pid != ep.pid:
+                # Proven ours, but a different process than the one on record:
+                # systemd restarted the unit. Re-stamp, persist, and say so —
+                # anything holding a job id from the previous process needs to
+                # know it is gone.
+                log.info("rcd restarted on %s: pid %d replaces %d",
+                         ep.base_url, pid, ep.pid)
+                self._endpoint = self._identify(ep)
+                _endpoints.save_endpoint(self._endpoint)
+                self._invalidate_proof()
+                BUS.daemon_restarted.emit("rcd", self._endpoint.execute_id)
             return self._set_health(DaemonHealth.UP)
 
         stranger = self._foreign
@@ -381,7 +456,47 @@ class RcdSupervisor(QObject):
             if not self.verify_ownership(stranger):
                 return self._set_health(DaemonHealth.FOREIGN)
         self._foreign = None
+        self._invalidate_proof()
         return self._set_health(DaemonHealth.DOWN)
+
+    def _proven_owner(self, ep: RcEndpoint) -> int:
+        """:meth:`observed_owner`, but not on every single tick.
+
+        The full proof is a ``core/pid`` round trip plus two ``/proc`` reads,
+        and `health()` runs every two seconds for the life of the process — so
+        this was two blocking calls per tick on the GUI thread, forever, and up
+        to two seconds of frozen UI per tick whenever the daemon was slow to
+        answer.
+
+        What the proof answers — "is the thing on our port a stranger?" — is not
+        a question whose answer changes every two seconds. `is_alive()` already
+        ran before this and is the signal that actually needs to be fresh, so
+        the expensive half is cached against the endpoint's address for
+        :data:`PROOF_TTL_S` and re-run when it expires or the address moves.
+        """
+        now = time.monotonic()
+        key = (ep.host, ep.port)
+        if self._proof_key == key and now - self._proof_at < PROOF_TTL_S:
+            return self._proof_pid
+        pid = self.observed_owner(ep)
+        if not pid:
+            # Never cache a failure. `observed_owner` returns 0 for a `core/pid`
+            # that merely timed out at its one-second budget, and "alive but
+            # slow" is a real state for a daemon under load — caching that
+            # turned one slow reply into thirty seconds of FOREIGN, which the
+            # ladder reports as a red error and which no amount of the daemon
+            # recovering could clear until the entry expired.
+            self._invalidate_proof()
+            return 0
+        self._proof_key, self._proof_at, self._proof_pid = key, now, pid
+        return pid
+
+    def _invalidate_proof(self) -> None:
+        """Force the next `health()` to re-prove, after anything that moves the
+        daemon: a provision, an adoption, or a restart we noticed."""
+        self._proof_key = None
+        self._proof_at = 0.0
+        self._proof_pid = 0
 
     def _set_health(self, health: DaemonHealth) -> DaemonHealth:
         if health != self._health:
@@ -419,6 +534,7 @@ class RcdSupervisor(QObject):
                 )
             self._endpoint = self._identify(recorded)
             _endpoints.save_endpoint(self._endpoint)
+            self._invalidate_proof()
             self._set_health(DaemonHealth.UP)
             log.info("adopted the running rcd on %s (pid %d, executeId %s)",
                      self._endpoint.base_url, self._endpoint.pid,
@@ -442,7 +558,15 @@ class RcdSupervisor(QObject):
         self._systemd.daemon_reload()
         self._systemd.enable(self._unit)
         self._set_health(DaemonHealth.STARTING)
-        self._systemd.start(self._unit)
+        # `restart`, not `start`. We have just written a NEW ExecStart, with a
+        # freshly picked port and freshly generated credentials; a `start` on a
+        # unit systemd already considers active is a silent no-op, and what
+        # keeps running is the previous launch — on the previous port, with the
+        # previous password. Everything after this line then probes an address
+        # nothing of ours is listening on, and the client reports the daemon as
+        # down while an orphan of its own goes on holding a port. Restart is the
+        # only verb that means "make what is running match what I just wrote".
+        self._systemd.restart(self._unit)
 
         if not self._wait_alive(ep):
             self._note_failure()
@@ -462,6 +586,7 @@ class RcdSupervisor(QObject):
 
         self._endpoint = self._identify(ep)
         _endpoints.save_endpoint(self._endpoint)
+        self._invalidate_proof()
         self._set_health(DaemonHealth.UP)
         log.info("started rcd on %s (pid %d, executeId %s)",
                  self._endpoint.base_url, self._endpoint.pid,
@@ -509,6 +634,9 @@ class RcdSupervisor(QObject):
 
         self._set_health(DaemonHealth.STARTING)
         self._systemd.restart(self._unit)
+        # The process behind the port has just been replaced, so any cached
+        # ownership verdict describes a pid that no longer exists.
+        self._invalidate_proof()
 
         ep = self._endpoint
         if ep is None or not self._wait_alive(ep):

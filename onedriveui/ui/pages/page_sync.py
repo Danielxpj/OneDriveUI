@@ -88,10 +88,6 @@ class SyncPage(QWidget):
 
         column.addWidget(SectionHeading(SETTINGS.NAV_SYNC, self))
         column.addWidget(self._backup_card())
-        column.addWidget(self._toggle_card(SETTINGS.SCREENSHOTS,
-                                           "extras.screenshots"))
-        column.addWidget(self._toggle_card(SETTINGS.CAMERA_IMPORT,
-                                           "extras.camera_import"))
         column.addWidget(self._toggle_card(SETTINGS.START_AT_SIGNIN,
                                            "app.autostart"))
         column.addWidget(self._toggle_card(SETTINGS.PAUSE_METERED,
@@ -276,8 +272,20 @@ class SyncPage(QWidget):
             pinner.download_all()
 
     def _cached_bytes(self) -> int:
-        info = self._services.get("filestate")
-        return int(getattr(info, "cached_bytes", 0) or 0)
+        """How much the VFS cache is holding on this device.
+
+        From the `vfs/stats` sample the probe already keeps. This used to read
+        `filestate.cached_bytes`, an attribute `FileStateService` does not have,
+        so `getattr(..., 0)` returned zero every time and "Free up disk space"
+        always asked the user to confirm freeing **0 bytes** — which reads as a
+        broken button rather than a safe one.
+
+        `diskCache.bytesUsed` is the authoritative figure and is already being
+        sampled every couple of seconds, so this costs nothing and never blocks.
+        """
+        probe = self._services.get("vfs_probe")
+        info = getattr(probe, "last", None) if probe is not None else None
+        return int(getattr(info, "bytes_used", 0) or 0)
 
     def _remote_bytes(self) -> int:
         quota = self._services.get("quota")
@@ -290,7 +298,11 @@ class SyncPage(QWidget):
     def _read(self, key: str, default: Any) -> Any:
         if self._config is None:
             return default
-        return self._config.get(key, default)
+        # Scoped to THIS page's account. `Config.get`/`set` otherwise resolve
+        # every account key against the *active* account, so a Settings window
+        # opened on the second account silently read and edited the first one's.
+        return self._config.get(
+            key, default, account_id=getattr(self.account, "id", None))
 
     def _write(self, key: str, value: Any) -> None:
         """Write one dotted key, atomically, and announce it.
@@ -304,7 +316,9 @@ class SyncPage(QWidget):
         from onedriveui import config as config_module
         from onedriveui.bus import BUS
 
-        if not self._config.set(key, value):
+        if not self._config.set(
+                key, value,
+                account_id=getattr(self.account, "id", None)):
             return                      # unchanged, or an unknown key
         try:
             config_module.save(self._config)

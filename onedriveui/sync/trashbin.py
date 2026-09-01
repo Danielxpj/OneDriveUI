@@ -96,6 +96,26 @@ def web_recyclebin_url(account: AccountInfo) -> str:
     return WEB_RECYCLE_BIN
 
 
+def _free_name(fs: str, rel_path: str, endpoint: Any,
+               *, limit: int = 100) -> str:
+    """A path next to `rel_path` that nothing occupies.
+
+    ``name (restored).ext``, then ``name (restored 2).ext`` and so on. Bounded:
+    a hundred collisions on one name means something is generating them, and
+    walking forever would hang the restore rather than fail it.
+    """
+    from pathlib import PurePosixPath
+
+    path = PurePosixPath(rel_path)
+    stem, suffix = path.stem, path.suffix
+    for attempt in range(1, limit + 1):
+        tag = "restored" if attempt == 1 else f"restored {attempt}"
+        candidate = str(path.with_name(f"{stem} ({tag}){suffix}"))
+        if ops.stat(fs, candidate, ep=endpoint, files_only=True) is None:
+            return candidate
+    raise OSError(f"no free name beside {rel_path} after {limit} attempts")
+
+
 class TrashBin(QObject):
     """Soft delete, restore, and expiry — all server-side.
 
@@ -208,9 +228,26 @@ class TrashBin(QObject):
             log.warning("no trash entry %s to restore", trash_id)
             return False
 
+        # `operations/movefile` overwrites its destination without asking. A
+        # user who deleted a file and then made a new one with the same name
+        # would have had the new one silently destroyed by the restore — the
+        # single worst thing a *recovery* feature can do. Restoring alongside
+        # keeps both, which is the same resolution the conflict policy uses.
+        target = entry.rel_path
+        try:
+            if ops.stat(self.account.fs, target, ep=endpoint,
+                        files_only=True) is not None:
+                target = _free_name(self.account.fs, target, endpoint)
+                log.info("%s is occupied; restoring alongside as %s",
+                         entry.rel_path, target)
+        except (RcError, DaemonUnavailable, OSError):
+            log.error("could not check whether %s is occupied; not restoring",
+                      entry.rel_path, exc_info=True)
+            return False
+
         try:
             ops.movefile(self.account.fs, entry.trash_path,
-                         self.account.fs, entry.rel_path, ep=endpoint)
+                         self.account.fs, target, ep=endpoint)
         except (RcError, DaemonUnavailable, OSError):
             log.error("could not restore %s", entry.rel_path, exc_info=True)
             return False
@@ -260,6 +297,11 @@ class TrashBin(QObject):
             except (RcError, DaemonUnavailable, OSError):
                 log.warning("could not purge %s", entry.trash_path, exc_info=True)
                 continue
+            # The bytes are gone for good, so the row must go with them.
+            # Without this the item stayed in the list as restorable — pointing
+            # at a path that no longer exists — and came back due on every
+            # later sweep, to be "purged" again for ever.
+            repo_files.forget_trashed(entry.id, writer=self._writer)
             purged += 1
         if purged:
             log.info("purged %d expired trash items for %s", purged,

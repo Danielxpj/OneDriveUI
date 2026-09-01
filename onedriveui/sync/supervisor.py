@@ -98,6 +98,23 @@ MOUNT_HEALTHY_CLEAR_S: Final = 60.0
 PRUNE_INTERVAL_S: Final = 3600
 
 
+#: Which pause each paused state represents. The automatic ones are derived
+#: from the environment every tick and are never recorded in `PauseManager`, so
+#: this is how the enforcement learns what is actually in force.
+_PAUSE_REASON: dict[SyncState, PauseReason] = {
+    SyncState.PAUSED_MANUAL: PauseReason.MANUAL,
+    SyncState.PAUSED_METERED: PauseReason.METERED,
+    SyncState.PAUSED_BATTERY: PauseReason.BATTERY,
+    SyncState.PAUSED_QUOTA: PauseReason.QUOTA,
+}
+
+#: The states in which the upload queue must be held back on every tick.
+_PAUSED_STATES: frozenset[SyncState] = frozenset({
+    SyncState.PAUSED_MANUAL, SyncState.PAUSED_METERED,
+    SyncState.PAUSED_BATTERY, SyncState.PAUSED_QUOTA,
+})
+
+
 class Supervisor(QObject):
     """The tick loop, the effect executor, and `do()`.
 
@@ -207,6 +224,10 @@ class Supervisor(QObject):
         self._snapshot = SyncSnapshot(state=self._state, facts=self._collector.last())
         self._running = False
         self._mount_healthy_since: float | None = None
+        #: Actions currently executing, so `do()` cannot recurse into itself.
+        self._in_flight: set[RecoveryAction] = set()
+        #: The health facts the issue engine last saw; see `_on_collected`.
+        self._issue_signature: tuple[Any, ...] | None = None
         # Every scheduled job is treated as having just run. Seeded here rather
         # than only in `start()` so the property holds however the loop is
         # driven — `onedriveui --state` ticks once without ever calling
@@ -282,6 +303,33 @@ class Supervisor(QObject):
         already repainted by the time a toast appears.
         """
         self._reconcile_latches(facts)
+
+        # Turn this observation into durable issues, and close the ones the
+        # world has already fixed. Both methods existed, were tested, and had
+        # no caller: the `issues` table stayed empty for account-wide problems,
+        # so the tray's "Sync problems (N)" item never appeared, the flyout's
+        # issue list was always empty, and nothing ever auto-resolved. The
+        # ladder counts issues; this is what there was to count.
+        if self._issues is not None:
+            # Only when one of the facts they actually read has changed.
+            # `reconcile()` walks a dozen issue codes and `raise_issue()` and
+            # `resolve()` are each a blocking `DbWriter.submit_sync()` round
+            # trip — running the pair unconditionally put ten of those on the
+            # GUI thread every two seconds, for ever, to discover nothing had
+            # changed. In the steady state this signature never moves and the
+            # whole block is skipped.
+            signature = (facts.mount, facts.token, facts.daemon_rcd,
+                         facts.network, facts.out_of_space, facts.bisync,
+                         facts.quota.total, facts.quota.is_full,
+                         facts.issues_error, facts.issues_blocking)
+            if signature != self._issue_signature:
+                self._issue_signature = signature
+                try:
+                    self._issues.ingest_health(facts)
+                    self._issues.reconcile(facts)
+                except Exception:  # noqa: BLE001 - bookkeeping never stops a tick
+                    log.warning("could not update the issue list", exc_info=True)
+
         raw = reduce(facts)
         new = self._debouncer.apply(raw, self._monotonic())
         old, self._state = self._state, new
@@ -294,6 +342,16 @@ class Supervisor(QObject):
             self.state_changed.emit(old, new, facts)
             for effect in transition_effects(old, new, facts):
                 self._run_effect(effect, facts)
+
+        # Every tick while paused, not just on the edge into it.
+        # `PauseManager.enforce` says so in its own docstring — "Every tick, not
+        # once, because --vfs-write-back keeps adding items: a file saved during
+        # the pause joins the queue with its own five-second expiry and would
+        # upload immediately if nothing re-deferred it." It was reachable only
+        # from a transition effect, so a pause held whatever was already queued
+        # and let everything saved afterwards straight through.
+        if new in _PAUSED_STATES:
+            self._enforce_pause()
 
         self._run_due_jobs()
 
@@ -474,15 +532,28 @@ class Supervisor(QObject):
         endpoint = self._mountd.endpoint(self.account)
         if endpoint is None:
             return
-        deferred = self._pause.enforce(endpoint)
+        deferred = self._pause.enforce(endpoint,
+                                       reason=_PAUSE_REASON.get(self._state))
         log.info("deferred %s queued uploads for %s", deferred, self.account.id)
 
     def _effect_pause_release(self, facts: Facts) -> None:
+        """Flush the deferred queue on resume.
+
+        `release(ep)` returns 0 immediately when `ep` is None, and it was being
+        called bare — so resuming from a pause released nothing and the deferred
+        uploads sat until their horizon expired on its own, which is the whole
+        thing the flush exists to avoid.
+        """
         if self._pause is None:
             return
         resume = getattr(self._pause, "release", None)
-        if callable(resume):
-            resume()
+        if not callable(resume):
+            return
+        endpoint = (self._mountd.endpoint(self.account)
+                    if self._mountd is not None else None)
+        released = resume(endpoint)
+        log.info("released %s deferred upload(s) for %s", released,
+                 self.account.id)
 
     # ── jobs and stats ──────────────────────────────────────────────────────
     def _effect_jobs_suspend(self, facts: Facts) -> None:
@@ -659,10 +730,30 @@ class Supervisor(QObject):
         handler = self._ACTIONS.get(action)
         if handler is None:
             raise KeyError(f"no handler for recovery action {action!r}")
+
+        # Re-entrancy guard. Four actions — FORCE_DELETE, RESTORE_FROM_BACKUP,
+        # UNLOCK_BISYNC and STOP_SYNCING_ITEM — are delegated in BOTH
+        # directions: `do()` hands them to `IssueEngine.execute()`, whose
+        # `_fix_*` hands them straight back to `do()`. Neither side implements
+        # them, so the pair recursed until Python gave up, and a user clicking
+        # the fix button on a sync issue took the whole client down with a
+        # RecursionError. Refusing the re-entry turns a crash into one honest
+        # log line, and it holds for any future cycle rather than for these four.
+        if action in self._in_flight:
+            log.error(
+                "do(%s) re-entered itself for %s — the action is delegated in a "
+                "cycle and implemented at neither end; refusing to recurse",
+                action.value, self.account.id)
+            return
+
         self.history.append((utcnow_iso(), action.value, dict(kw)))
         del self.history[:-200]
         log.info("do(%s) for %s: %s", action.value, self.account.id, sorted(kw))
-        getattr(self, handler)(**kw)
+        self._in_flight.add(action)
+        try:
+            getattr(self, handler)(**kw)
+        finally:
+            self._in_flight.discard(action)
 
     # ── issue-scoped: delegated to WP-07's engine ───────────────────────────
     def _action_via_issues(self, action: RecoveryAction, **kw: Any) -> None:
@@ -713,7 +804,54 @@ class Supervisor(QObject):
         if self._auth is None:
             log.warning("no auth flow wired; sign-in was not started")
             return
-        self._auth.start()
+        # `AuthFlow.start(remote, ...)` requires the remote to re-authorise —
+        # calling it bare raised TypeError, so even a wired flow could not have
+        # signed anyone in.
+        self._auth.start(self.account.remote)
+
+    def _do_pin(self, *, rel_path: str | None = None,
+                recursive: bool = False, **kw: Any) -> None:
+        """Keep a path on this device. The other half of free-up-space.
+
+        Hydration itself is the Pinner's job and runs on the IOPool; this only
+        records the intent and asks for it.
+        """
+        if self._pinner is None:
+            log.warning("no pinner wired; pin was not performed")
+            return
+        if not rel_path:
+            log.warning("pin needs a rel_path")
+            return
+        # A folder is pinned recursively unless told otherwise. "Always keep on
+        # this device" on a folder means its contents; pinning the directory
+        # entry alone downloads nothing, which looks exactly like the feature
+        # not working. The caller can still ask for a shallow pin explicitly.
+        if not recursive:
+            from pathlib import Path as _Path
+
+            try:
+                recursive = (_Path(self.account.sync_root).expanduser()
+                             / rel_path).is_dir()
+            except OSError:
+                recursive = False
+        self._pinner.pin(rel_path, recursive=recursive)
+
+    def _do_unpin(self, *, rel_path: str | None = None,
+                  recursive: bool = False, **kw: Any) -> None:
+        """Stop keeping a path on this device.
+
+        Deliberately *not* an eviction: unpinning releases the promise, and
+        the cache reclaims the bytes on its own schedule. A user who wants the
+        space back now asks for free-up-space, which is a separate action with
+        its own guard.
+        """
+        if self._pinner is None:
+            log.warning("no pinner wired; unpin was not performed")
+            return
+        if not rel_path:
+            log.warning("unpin needs a rel_path")
+            return
+        self._pinner.unpin(rel_path, recursive=recursive)
 
     def _do_free_up_space(self, *, rel_path: str | None = None, **kw: Any) -> None:
         """Evict cached copies. Never touches a dirty or queued file.
@@ -785,6 +923,8 @@ class Supervisor(QObject):
         RecoveryAction.KEEP_LOCAL: "_do_keep_local",
         RecoveryAction.KEEP_CLOUD: "_do_keep_cloud",
         RecoveryAction.SIGN_IN: "_do_sign_in",
+        RecoveryAction.PIN: "_do_pin",
+        RecoveryAction.UNPIN: "_do_unpin",
         RecoveryAction.FREE_UP_SPACE: "_do_free_up_space",
         RecoveryAction.GET_MORE_STORAGE: "_do_get_more_storage",
         RecoveryAction.RESYNC: "_do_resync",
@@ -842,15 +982,18 @@ class Supervisor(QObject):
                 unanswered, or not an approval. An *expired* decision is a
                 refusal, matching the seven-day rule.
         """
-        from onedriveui.rc import bisync
-
-        bisync.assert_resync_approved(self._decision_row(decision_id))
-        log.warning("resync approved by decision %s for %s",
-                    decision_id, self.account.id)
-        if self._bisync is None:
-            log.warning("no bisync runner wired; the approved resync did not run")
-            return
-        self._bisync.resync(self.account)
+        # There is no bisync engine any more. This client mounts the remote;
+        # it does not keep a second, locally-materialised copy synchronised
+        # two-way, and "--resync" is meaningless without one. The decision is
+        # still validated so an approval recorded by an older build cannot be
+        # replayed into whatever comes next.
+        row = self._decision_row(decision_id)
+        if row is None:
+            raise SafetyRefusal(
+                "I15", f"no decision {decision_id} to authorise a resync")
+        log.warning(
+            "a resync was requested for %s by decision %s, but this client has "
+            "no two-way sync engine to run one", self.account.id, decision_id)
 
     def _decision_row(self, decision_id: int) -> Mapping[str, Any] | None:
         """One `decisions` row, as a mapping, or ``None``.
@@ -894,13 +1037,32 @@ class Supervisor(QObject):
         if health is not MountHealth.STALE:
             pending = self._mountd.uploads_in_progress(self.account)
             if pending != 0:
-                log.warning(
-                    "refusing to restart the mount for %s (%s): %s — invariant I3 "
-                    "forbids disturbing an upload that exists nowhere else",
-                    self.account.id, reason,
-                    f"uploadsInProgress={pending}" if pending > 0
-                    else "vfs/stats could not be read")
-                return
+                # `-1` is "we could not ask", and that splits in two. If the
+                # mount's rc is alive but the call failed, stay cautious: there
+                # may be an upload we cannot see. If nothing is serving at all,
+                # there is no VFS holding anything and nothing to protect.
+                #
+                # That distinction is what makes stale-mount recovery work. The
+                # reducer emits MOUNT_FORCE_UNMOUNT and MOUNT_RESTART together,
+                # in that order, so by the time the restart runs the corpse is
+                # gone, the mount is no longer STALE, `vfs/stats` has nobody to
+                # answer it — and the refusal below fired every single time. The
+                # recovery path could not complete: the client tore the dead
+                # mount down and then declined to bring it back, leaving the
+                # account with no filesystem until someone restarted the app.
+                unreachable = pending < 0
+                if unreachable and not self._mountd.is_serving(self.account):
+                    log.info(
+                        "no mount is serving %s; there is no upload to protect, "
+                        "restarting (%s)", self.account.id, reason)
+                else:
+                    log.warning(
+                        "refusing to restart the mount for %s (%s): %s — invariant "
+                        "I3 forbids disturbing an upload that exists nowhere else",
+                        self.account.id, reason,
+                        f"uploadsInProgress={pending}" if pending > 0
+                        else "vfs/stats could not be read")
+                    return
 
         if self._mountd.restarts_this_hour(self.account) >= MOUNT_RESTART_MAX_PER_HOUR:
             # The ladder is exhausted. Latch it, so the state survives a restart

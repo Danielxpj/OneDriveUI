@@ -31,6 +31,7 @@ from typing import Any, Final
 
 from PySide6.QtCore import QObject, Signal
 
+from onedriveui import paths
 from onedriveui.data import repo_files
 from onedriveui.errors import SafetyRefusal
 from onedriveui.models import AccountInfo, RunVerdict
@@ -88,12 +89,16 @@ class SelectiveSync(QObject):
         *,
         writer: Any = None,
         resync: Any = None,
+        evict: Any = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self.account = account
         self._writer = writer
         self._resync = resync
+        #: ``(rel_path) -> bytes freed``, evicting a folder from the VFS cache.
+        #: Injected: this module must not depend on the rc layer.
+        self._evict = evict
 
     # ═════════════════════════════════════════════════════════════════════════
     # Reads
@@ -134,7 +139,7 @@ class SelectiveSync(QObject):
     # ═════════════════════════════════════════════════════════════════════════
 
     def apply(self, excluded: list[str], *, prune: bool = True) -> PruneResult:
-        """Change the selection: filters, then resync, then prune. In that order.
+        """Change the selection: filters, then persist, then prune. In that order.
 
         Args:
             excluded: Folders to stop syncing, relative to the sync root.
@@ -146,14 +151,15 @@ class SelectiveSync(QObject):
             A :class:`PruneResult` describing what was reclaimed.
 
         Raises:
-            SafetyRefusal: The filters changed and the resync did not succeed.
-                Invariant I11. The previous filters file and digest are restored
-                *before* this propagates, so the account is left exactly as
-                syncable as it was — and, because the prune is below the resync
-                and not above it, **nothing local has been touched**. Failing
-                loudly is the point: a settings page that quietly reported
-                success would leave the user believing a selection took effect
-                when it did not.
+            SafetyRefusal: The filters file could not be written. The previous
+                file and digest are restored *before* this propagates, so the
+                account is left exactly as syncable as it was — and, because the
+                prune is below the rewrite and not above it, **nothing local has
+                been touched**.
+
+        The exclusions take effect on the mount's next start, which is why the
+        rclone page offers the restart: `--exclude` is a command-line argument,
+        and a running mount cannot be told about a new one.
         """
         result = PruneResult()
         with filters.rewrite(self.account.id, excluded) as txn:
@@ -162,19 +168,18 @@ class SelectiveSync(QObject):
                 self._persist(excluded)
                 return result
 
-            verdict = self._run_resync()
-            if verdict is not RunVerdict.OK:
-                # Falling out of the block *without* calling `resynced()` is how
-                # the rollback is triggered: `FiltersTransaction.__exit__`
-                # restores the previous file and digest and raises SafetyRefusal.
-                # Nothing local has been touched, because the prune is below this
-                # line and not above it — which is the ordering this whole module
-                # exists to get right.
-                log.error("the resync after a filters change did not succeed "
-                          "(%s); rolling back and pruning nothing",
-                          getattr(verdict, "value", verdict))
-            else:
-                txn.resynced()
+            # No resync. Invariant I11 — "a filters change obliges a
+            # --resync" — is a *bisync* rule: rclone stores an MD5 of the
+            # filters file beside its listings and aborts every later run when
+            # it changes. This client has no bisync any more. The filters file
+            # now feeds one thing, the mount's `--exclude` rules, and the mount
+            # reads those when it next starts.
+            #
+            # Leaving the gate in place would have made every real selection
+            # change fail: `_run_resync()` finds no runner, returns UNKNOWN, and
+            # the transaction rolls back with a SafetyRefusal — so "Choose
+            # folders" would refuse any change the user actually made.
+            txn.resynced()
 
         self._persist(excluded)
         self.applied.emit(list(excluded))
@@ -196,8 +201,26 @@ class SelectiveSync(QObject):
             return RunVerdict.UNKNOWN
 
     def _persist(self, excluded: list[str]) -> None:
-        for rel_path in excluded:
+        """Record the new selection — **both** directions.
+
+        Unchecking a folder was written; re-checking one was not, because this
+        only ever wrote `selected=False` for the paths in `excluded`. A folder
+        the user brought back therefore stayed marked deselected in the database
+        forever, while the filters file said the opposite — and the picker,
+        which reads the database, kept showing it unchecked no matter how many
+        times it was ticked.
+
+        The paths that were excluded before and are not now are exactly the ones
+        being re-selected, so the old state has to be read before the new one
+        is written.
+        """
+        wanted = set(excluded)
+        previously = set(repo_files.excluded_paths(self.account.id))
+        for rel_path in wanted:
             repo_files.set_selection(self.account.id, rel_path, False,
+                                     writer=self._writer)
+        for rel_path in previously - wanted:
+            repo_files.set_selection(self.account.id, rel_path, True,
                                      writer=self._writer)
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -225,6 +248,28 @@ class SelectiveSync(QObject):
         """
         result = PruneResult()
         root = Path(self.account.sync_root).expanduser().resolve()
+
+        # In the mount topology — the one this client actually runs — the sync
+        # root IS the FUSE mountpoint, and there are no local files to trash:
+        # the bytes live in the VFS cache. `assert_trashable` refuses every path
+        # inside a mount, so every prune here was skipped and unticking a folder
+        # reclaimed nothing at all.
+        #
+        # That refusal is right, and load-bearing: moving a path inside the
+        # mount to the local trash is a *delete through the mount*, which rclone
+        # propagates to the cloud. Unticking a folder in a settings dialog must
+        # never delete it from OneDrive. Evicting its cached copies is the
+        # operation that actually frees the disk and touches nothing remote.
+        if self._evict is not None and paths.is_under_fuse_mount(root):
+            for rel_path in excluded:
+                try:
+                    result.bytes_freed += int(self._evict(rel_path) or 0)
+                    result.trashed.append(rel_path)
+                except Exception as exc:  # noqa: BLE001 - one folder, not all
+                    result.skipped.append((rel_path, str(exc)))
+                    log.warning("could not evict %s", rel_path, exc_info=True)
+            return result
+
         for rel_path in excluded:
             target = (root / rel_path).resolve()
             if not target.exists():

@@ -483,6 +483,47 @@ class TestActivityCenterWiring:
         assert "settings_requested" in connected
         assert "help_requested" in connected
 
+    def test_it_opens_the_flyout_through_open_(self, qapp, _isolate_home):
+        """Not `show()`. Placement, the height measurement and the refresh all
+        live in `ActivityCenter.open_`; a bare `show()` gets none of them, and
+        on an already-visible window it is a no-op — which is what "I clicked
+        Open Activity Center while it was open and something weird happened"
+        looks like from the outside."""
+        from onedriveui.app import Application
+
+        calls: list[str] = []
+
+        class Window:
+            def open_(self):
+                calls.append("open_")
+
+            def show(self):
+                calls.append("show")
+
+            def raise_(self):
+                calls.append("raise_")
+
+        app = Application.__new__(Application)
+        app._engines = {"onedrive": SimpleNamespace(
+            account=AccountInfo(id="onedrive", remote="onedrive"),
+            supervisor=None, services={})}
+        window = Window()
+        app._windows = {"onedrive": window}
+
+        assert app.open_activity("onedrive") is window
+        assert calls == ["open_"]
+
+        app.open_activity("onedrive")          # already open: re-place, refresh
+        assert calls == ["open_", "open_"]
+
+    def test_an_unknown_account_opens_nothing(self, qapp, _isolate_home):
+        from onedriveui.app import Application
+
+        app = Application.__new__(Application)
+        app._engines = {}
+        app._windows = {}
+        assert app.open_activity("nope") is None
+
     def test_the_window_declares_what_the_root_connects(self, qapp):
         """A rename on either side has to fail here rather than in a click."""
         from onedriveui.ui.activity_center import ActivityCenter

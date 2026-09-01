@@ -143,13 +143,59 @@ class AccountPage(QWidget):
                 log.debug("could not preview the folder selection", exc_info=True)
 
         dialog = ChooseFoldersDialog(preview=preview, parent=self)
+        self._fill_folder_tree(dialog, selective)
         dialog.exec()
         if not dialog.approved() or selective is None:
             return
         try:
-            selective.apply(selective.excluded())
+            # What the user actually ticked — not `selective.excluded()`, which
+            # is the selection that was *already* stored. Applying that made OK
+            # a no-op that looked like it had worked.
+            selective.apply(dialog.tree().excluded())
         except Exception:  # noqa: BLE001 - a refused change is reported, not silent
             log.error("the folder selection could not be applied", exc_info=True)
+
+    def _fill_folder_tree(self, dialog: Any, selective: Any) -> None:
+        """Populate the picker with the drive's top-level folders.
+
+        The tree was never filled, so the dialog opened empty and there was
+        nothing to choose from. The listing is a blocking rc call, so it goes to
+        the IOPool (ARCHITECTURE §7.6) and lands back on the GUI thread — which
+        the modal `exec()` below still services, because a modal dialog runs a
+        nested event loop rather than blocking it.
+
+        Only the top level. `children()` is explicitly never recursive, and
+        walking a whole drive to open a dialog is the kind of thing that makes a
+        settings window take a minute.
+        """
+        browser = self._services.get("browse")
+        if browser is None:
+            return
+        try:
+            stored = selective.selection() if selective is not None else {}
+        except Exception:  # noqa: BLE001 - an unknown selection means all-checked
+            stored = {}
+
+        def fill(nodes: Any) -> None:
+            from PySide6.QtCore import Qt
+
+            tree = dialog.tree()
+            for node in nodes or ():
+                if not getattr(node, "is_dir", False):
+                    continue
+                rel = node.rel_path
+                checked = (Qt.CheckState.Checked if stored.get(rel, True)
+                           else Qt.CheckState.Unchecked)
+                try:
+                    tree.add_folder(node.name, rel_path=rel, checked=checked)
+                except RuntimeError:
+                    return          # the dialog was closed while we listed
+
+        from onedriveui.platform.iopool import instance as io_pool
+
+        io_pool().submit(browser.children, "", kind="rc", on_done=fill,
+                         on_error=lambda exc: log.warning(
+                             "could not list the drive's folders: %s", exc))
 
     def _on_unlink(self) -> None:
         """Confirm, then unlink. **Every file stays.**

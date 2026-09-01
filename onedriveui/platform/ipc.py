@@ -192,6 +192,12 @@ class IpcServer(QObject):
     #: `(str verb, list[str] absolute paths)`.
     action_requested = Signal(str, list)
 
+    #: `(str verb, list[str] paths, dict request)` — the same event with the
+    #: rest of the frame attached. `action_requested` drops every field but
+    #: those two, so a verb with an argument could never be served: the
+    #: launcher's "Pause syncing" sends `hours`, and it arrived nowhere.
+    command_requested = Signal(str, list, dict)
+
     #: The hard per-request budget, in milliseconds.
     BUDGET_MS: Final[int] = BUDGET_MS
 
@@ -589,6 +595,7 @@ class IpcServer(QObject):
             return {"op": OP_ERROR, "v": PROTOCOL_VERSION, "error": "no action"}
         log.info("IPC action %r on %d path(s)", action, len(targets))
         self.action_requested.emit(action, targets)
+        self.command_requested.emit(action, targets, dict(payload))
         if self._mirror_to_bus:
             BUS.ipc_action_requested.emit(action, targets)
         return {"op": OP_OK, "v": PROTOCOL_VERSION}

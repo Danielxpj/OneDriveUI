@@ -104,7 +104,9 @@ BENIGN_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 _RULES: tuple[tuple[re.Pattern[str], IssueCode, IssueSeverity], ...] = (
-    (re.compile(r"quotaLimitReached|insufficient storage|507", re.I),
+    (re.compile(r"quotaLimitReached|insufficient storage"
+                r"|(?:\b(?:HTTP|status|code|error)\b\W{0,12})507\b"
+                r"|\b507\s+Insufficient", re.I),
      IssueCode.QUOTA_EXCEEDED,      IssueSeverity.BLOCKING),
     (re.compile(r"no space left on device|ENOSPC", re.I),
      IssueCode.DISK_FULL,           IssueSeverity.BLOCKING),
@@ -116,9 +118,13 @@ _RULES: tuple[tuple[re.Pattern[str], IssueCode, IssueSeverity], ...] = (
      IssueCode.MALWARE_DETECTED,    IssueSeverity.ERROR),
     (re.compile(r"are same name when lowercase|nameAlreadyExists", re.I),
      IssueCode.CASE_COLLISION,      IssueSeverity.ERROR),
-    (re.compile(r"accessDenied|403|permission denied|unauthorized", re.I),
+    (re.compile(r"accessDenied|permission denied|unauthorized"
+                r"|(?:\b(?:HTTP|status|code|error)\b\W{0,12})403\b"
+                r"|\b403\s+Forbidden", re.I),
      IssueCode.PERMISSION_LOST,     IssueSeverity.ERROR),
-    (re.compile(r"429|activityLimitReached|too many requests|Retry-After", re.I),
+    (re.compile(r"activityLimitReached|too many requests|Retry-After"
+                r"|(?:\b(?:HTTP|status|code|error)\b\W{0,12})429\b"
+                r"|\b429\s+Too\s+Many", re.I),
      IssueCode.THROTTLED,           IssueSeverity.WARNING),
     (re.compile(r"connection refused|connection reset|no such host|network is unreachable"
                 r"|i/o timeout|EOF|dial tcp", re.I),
@@ -143,9 +149,20 @@ _RULES: tuple[tuple[re.Pattern[str], IssueCode, IssueSeverity], ...] = (
     #    They are matched AFTER the rules above so that a bisync abort, a name
     #    with invalid characters or a too-long path always wins over the more
     #    general phrasings below.
+    # The Windows reserved names must be matched as a whole PATH COMPONENT,
+    # never as a bare word. `\bAUX\b` with re.I matched the English and French
+    # word "aux" anywhere in a sentence, and `\bCON\b` matched "con" — so any
+    # error mentioning a directory legitimately named `aux` on Linux (where the
+    # name is perfectly legal) was reported to the user as a reserved-name
+    # violation, complete with a Rename button. Requiring a separator or a quote
+    # on the left keeps `/Docs/AUX.txt` and `"CON"` while dropping prose — the
+    # left anchor is deliberately NOT `^`, because with re.M that matched any
+    # message merely beginning with the word "aux", which is an ordinary French
+    # word and an ordinary directory name.
     (re.compile(r"reserved name|is reserved|invalidReservedName|_vti_"
                 r"|desktop\.ini|\.lock\b|~\$"
-                r"|\b(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])\b", re.I),
+                r"""|[/\\'"](?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])"""
+                r"""(?:\.[A-Za-z0-9]+)?(?=[/\\'"\s,:;)\]]|$)""", re.I | re.M),
      IssueCode.RESERVED_NAME,       IssueSeverity.ERROR),
     (re.compile(r"entityTooLarge|requestEntityTooLarge|file (?:is )?too large"
                 r"|larger than (?:the )?max|exceeds the maximum(?: file)? size"

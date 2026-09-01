@@ -338,6 +338,18 @@ class SetupWizard(QWidget):
         that aborts because the file it needs was never created is the worst
         possible introduction to a sync client.
         """
+        from onedriveui import paths
+
+        # Never into a live FUSE mount. `sync_root` **is** the mountpoint in the
+        # mount-only topology this client actually runs, so writing here does
+        # not create a local marker at all — it uploads a file called
+        # RCLONE_TEST into the root of the user's OneDrive, visible on every
+        # device they own, on the very first run. The file exists solely for
+        # bisync's `--check-access`, which the mount topology never uses.
+        if paths.is_under_fuse_mount(root):
+            log.info("%s is a live mount; not seeding RCLONE_TEST into the "
+                     "user's cloud", root)
+            return True
         try:
             root.mkdir(parents=True, exist_ok=True)
             (root / "RCLONE_TEST").write_text("", encoding="utf-8")

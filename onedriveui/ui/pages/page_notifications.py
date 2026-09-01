@@ -35,7 +35,6 @@ TOGGLES: Final[tuple[tuple[str, str], ...]] = (
     (SETTINGS.N_PAUSED, "notifications.paused"),
     (SETTINGS.N_SHARED, "notifications.shared_or_edited"),
     (SETTINGS.N_MASS_DELETE, "notifications.mass_delete"),
-    (SETTINGS.N_MEMORIES, "notifications.memories"),
     (SETTINGS.N_OTHER_ACCOUNTS, "notifications.other_accounts"),
     (SETTINGS.N_SYNC_ISSUES, "notifications.sync_issues"),
     (SETTINGS.N_CONFLICTS, "notifications.conflicts"),
@@ -94,7 +93,11 @@ class NotificationsPage(QWidget):
     def _read(self, key: str, default: Any) -> Any:
         if self._config is None:
             return default
-        return self._config.get(key, default)
+        # Scoped to THIS page's account. `Config.get`/`set` otherwise resolve
+        # every account key against the *active* account, so a Settings window
+        # opened on the second account silently read and edited the first one's.
+        return self._config.get(
+            key, default, account_id=getattr(self.account, "id", None))
 
     def _write(self, key: str, value: Any) -> None:
         if self._config is None:
@@ -102,7 +105,9 @@ class NotificationsPage(QWidget):
         from onedriveui import config as config_module
         from onedriveui.bus import BUS
 
-        if not self._config.set(key, value):
+        if not self._config.set(
+                key, value,
+                account_id=getattr(self.account, "id", None)):
             return
         try:
             config_module.save(self._config)

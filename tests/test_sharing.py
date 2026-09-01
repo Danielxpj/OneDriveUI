@@ -45,10 +45,8 @@ from onedriveui.models import (
 )
 from onedriveui.rc import ops
 from onedriveui.sync import trashbin as trashbin_mod
-from onedriveui.sync import versions as versions_mod
 from onedriveui.sync.sharing import ShareService
 from onedriveui.sync.trashbin import TrashBin, retention_days, trash_path_for
-from onedriveui.sync.versions import VersionStore, run_suffix
 
 ACCOUNT = AccountInfo(id="onedrive", remote="onedrive", sync_root="/tmp/OneDrive")
 BUSINESS = AccountInfo(id="work", remote="work", kind=AccountKind.BUSINESS,
@@ -348,87 +346,3 @@ class TestPurge:
 # Versions
 # ═════════════════════════════════════════════════════════════════════════════
 
-class TestVersions:
-
-    def store_(self, store) -> VersionStore:
-        return VersionStore(ACCOUNT, endpoint=lambda: ENDPOINT, writer=store)
-
-    def test_the_run_suffix_has_no_invalid_characters(self):
-        """A colon is invalid in a OneDrive path, so a backup directory named
-        with one would be unsyncable by the sync that created it."""
-        suffix = run_suffix("2026-08-31T12:00:00Z")
-        assert suffix == "20260831T120000Z"
-        assert ":" not in suffix and "-" not in suffix
-
-    def test_a_run_is_indexed(self, qapp, store, monkeypatch):
-        directory = f"{REMOTE_VERSIONS_DIR}/20260831T120000Z"
-        monkeypatch.setattr(ops, "list_dir", lambda fs, remote="", **kw: [
-            RemoteFolderNode(rel_path=f"{directory}/Docs/a.txt", name="a.txt",
-                             size=100),
-        ])
-        run = RunRecord(run_id="r1", account_id=ACCOUNT.id, kind=RunKind.BISYNC,
-                        started_at="2026-08-31T12:00:00Z")
-        assert self.store_(store).index_run(run) == 1
-        store.flush()
-        assert [v.rel_path for v in repo_files.versions_for(ACCOUNT.id, "Docs/a.txt")] \
-            == ["Docs/a.txt"]
-
-    def test_the_web_history_is_linked_because_we_cannot_list_it(self, qapp, store):
-        """rclone can delete versions and can neither list nor restore them, so
-        the deep link is the honest answer rather than a gap."""
-        vs = self.store_(store)
-        assert vs.web_version_url("item123").startswith("https://")
-        assert "Version history" in vs.WHY_WEB
-
-    def test_restore_captures_the_current_copy_first(self, qapp, store, monkeypatch):
-        """A user restoring Tuesday's draft has not decided to discard today's
-        work. Overwriting without capturing makes restore destructive and
-        unrepeatable, which defeats a version-history feature entirely."""
-        copies: list[tuple[str, str]] = []
-        monkeypatch.setattr(ops, "copyfile",
-                            lambda sf, sr, df, dr, **kw: copies.append((sr, dr)))
-        version_id = repo_files.add_version(VersionEntry(
-            account_id=ACCOUNT.id, rel_path="Docs/a.txt",
-            backup_path=f"{REMOTE_VERSIONS_DIR}/20260831T120000Z/Docs/a.txt",
-            captured_at="2026-08-31T12:00:00Z"), writer=store)
-        store.flush()
-
-        assert self.store_(store).restore_version(version_id) is True
-        # First the current copy is captured, then the old one comes back.
-        assert copies[0][0] == "Docs/a.txt"
-        assert copies[0][1].startswith(f"{REMOTE_VERSIONS_DIR}/")
-        assert copies[1][1] == "Docs/a.txt"
-
-    def test_a_failed_capture_refuses_to_restore(self, qapp, store, monkeypatch):
-        """Restoring over an uncaptured current copy is the one outcome this
-        method exists to prevent."""
-        def explode(*a, **kw):
-            raise RcError("operations/copyfile", 500, {"error": "no"})
-
-        monkeypatch.setattr(ops, "copyfile", explode)
-        version_id = repo_files.add_version(VersionEntry(
-            account_id=ACCOUNT.id, rel_path="Docs/a.txt",
-            backup_path=f"{REMOTE_VERSIONS_DIR}/x/Docs/a.txt"), writer=store)
-        store.flush()
-        assert self.store_(store).restore_version(version_id) is False
-
-    def test_deleting_a_version_cannot_reach_a_live_file(self, qapp, store,
-                                                         monkeypatch):
-        monkeypatch.setattr(ops, "deletefile",
-                            lambda *a, **kw: pytest.fail("deleted a live file"))
-        version_id = repo_files.add_version(VersionEntry(
-            account_id=ACCOUNT.id, rel_path="Docs/a.txt",
-            backup_path="Docs/a.txt"), writer=store)   # not under versions/
-        store.flush()
-        assert self.store_(store).delete_version(version_id) is False
-
-    def test_the_module_surface_matches_the_contract(self, qapp, store):
-        """CONTRACTS §10.9 is written in terms of functions; the UI calls them
-        that way."""
-        assert callable(versions_mod.versions_for)
-        assert callable(versions_mod.restore_version)
-        assert callable(versions_mod.web_version_url)
-        assert callable(trashbin_mod.soft_delete)
-        assert callable(trashbin_mod.restore_from_trash)
-        assert callable(trashbin_mod.purge_expired)
-        assert callable(trashbin_mod.web_recyclebin_url)

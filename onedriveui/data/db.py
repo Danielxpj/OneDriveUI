@@ -56,7 +56,7 @@ __all__ = [
 
 #: The version ``migrations/`` brings a fresh database to. Bumped by adding a
 #: new ``00N_*.sql``, never by editing a shipped one.
-SCHEMA_VERSION: Final[int] = 1
+SCHEMA_VERSION: Final[int] = 2
 
 SCHEMA_DIR: Final[Path] = Path(__file__).resolve().parent
 MIGRATIONS_DIR: Final[Path] = SCHEMA_DIR / "migrations"
@@ -558,7 +558,14 @@ def vacuum_and_prune(
     applies at the end of a completed scan.
     """
     removed: dict[str, int] = {}
-    conn.execute("BEGIN IMMEDIATE")
+    # Only own the transaction when there is not one already. `DbWriter` wraps
+    # every batch in `BEGIN IMMEDIATE`, so a prune submitted to it would raise
+    # "cannot start a transaction within a transaction" — which is why the
+    # hourly prune of ARCHITECTURE §10 had no caller at all and the activity,
+    # issues and runs tables grew without limit for the life of the install.
+    owns_transaction = not conn.in_transaction
+    if owns_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     try:
         cur = conn.execute(
             "DELETE FROM activity WHERE id NOT IN ("
@@ -595,13 +602,26 @@ def vacuum_and_prune(
             "DELETE FROM trashbin WHERE restored_at IS NULL AND "
             "purge_after < datetime('now')")
         removed["trashbin"] = cur.rowcount if cur.rowcount > 0 else 0
-        conn.execute("COMMIT")
+        if owns_transaction:
+            conn.execute("COMMIT")
     except sqlite3.Error:
-        try:
-            conn.execute("ROLLBACK")
-        except sqlite3.Error:  # pragma: no cover - already rolled back
-            pass
+        # Only roll back a transaction we opened. Rolling back a caller's would
+        # discard writes that have nothing to do with this prune — the writer
+        # batches many operations into one transaction.
+        if owns_transaction:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:  # pragma: no cover - already rolled back
+                pass
         raise
+
+    if not owns_transaction:
+        # A checkpoint or a VACUUM inside someone else's open transaction either
+        # fails or blocks. When we are a guest, the pruning DELETEs are the
+        # whole contribution; the writer commits, and the next standalone run
+        # truncates the WAL.
+        removed["wal_pages"] = 0
+        return removed
 
     try:
         conn.execute("PRAGMA optimize")

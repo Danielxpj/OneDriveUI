@@ -969,6 +969,25 @@ class FolderTree(QTreeWidget):
             yield from self.walk(child)
 
     # ── propagation ──────────────────────────────────────────────────────
+    def excluded(self) -> list[str]:
+        """The folders the user has unticked, as sync-root-relative paths.
+
+        The tree could be populated and could report *changes*, but nothing
+        could read the resulting selection out of it — so "Choose folders"
+        had no way to tell anyone what the user had chosen, and applied the
+        selection that was already stored instead.
+
+        Only fully-unchecked folders are returned. A partially checked parent
+        means "some of these are excluded", and excluding the parent would
+        exclude the children the user deliberately kept.
+
+        Returns:
+            Relative paths, in tree order.
+        """
+        return [item.rel_path() for item in self.walk()
+                if item.checkState(0) is Qt.CheckState.Unchecked
+                and item.rel_path()]
+
     def is_updating(self) -> bool:
         """True while a propagation is running; the guard's own state."""
         return self._guard

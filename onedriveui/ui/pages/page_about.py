@@ -114,22 +114,37 @@ class AboutPage(QWidget):
         I1 stops this client creating any more; this reclaims what is already
         stranded, which on this machine is two whole trees.
         """
-        freed = self._orphan_bytes()
         button = FluentButton(SETTINGS.FREE_UP_SPACE, self,
                               variant=ButtonVariant.STANDARD)
         button.clicked.connect(self._on_reclaim)
         card = SettingsCard(
-            SETTINGS.FREE_UP_SPACE, self,
-            description=(human_bytes(freed) if freed else ""),
+            SETTINGS.FREE_UP_SPACE, self, description="",
             content=button, action_icon=False)
         self._cards["orphaned_cache"] = card
+        # Filled in when the measurement comes back; see the method's docstring
+        # for why it must not happen on this thread.
+        self._measure_orphans_async()
         return card
 
-    def _orphan_bytes(self) -> int:
+    def _measure_orphans_async(self) -> None:
+        """Measure the abandoned cache trees **off** the GUI thread.
+
+        This used to run inline while the Settings window was being built, and
+        it is two expensive things at once: a blocking `vfs/stats` round trip
+        with a four-second timeout, and then a full recursive walk of the VFS
+        cache — tens of thousands of small files on a drive of any size. Opening
+        Settings froze the whole UI for as long as both took, which ARCHITECTURE
+        §7.6 bans outright.
+
+        The card is built immediately with no size and fills itself in when the
+        answer arrives, so the window opens at once either way.
+        """
         mountd = self._services.get("mountd")
-        if mountd is None:
-            return 0
-        try:
+        card = self._cards.get("orphaned_cache")
+        if mountd is None or card is None:
+            return
+
+        def measure() -> int:
             from onedriveui.rc import vfs
 
             endpoint = mountd.endpoint(self.account)
@@ -137,9 +152,31 @@ class AboutPage(QWidget):
                 return 0
             info = vfs.disk_cache_info(endpoint)
             return sum(size for _path, size in vfs.orphaned_cache_trees(info))
-        except Exception:  # noqa: BLE001
-            log.debug("could not measure the orphaned cache", exc_info=True)
-            return 0
+
+        def show(freed: Any) -> None:
+            if not freed:
+                return
+            try:
+                card.set_description(human_bytes(freed))
+            except RuntimeError:
+                # The Settings window was closed while the walk was running.
+                # The answer arrives on the GUI thread either way, and by then
+                # the card's C++ side is gone; there is simply nothing left to
+                # tell.
+                log.debug("the orphan measurement outlived its card")
+
+        def failed(exc: BaseException) -> None:
+            log.debug("could not measure the orphaned cache: %s", exc)
+
+        from onedriveui.platform.iopool import instance as io_pool
+
+        token = io_pool().submit(measure, kind="cache_scan",
+                                 on_done=show, on_error=failed)
+        # Cancel the walk if the page goes away first — it can take a while over
+        # a large cache, and nobody is waiting for it any more. The handler
+        # closes over the token only: a `destroyed` callback that reached back
+        # through `self` would touch an object Qt has already deleted.
+        self.destroyed.connect(lambda *_, t=token: t.cancel())
 
     def _disk_usage_note(self) -> QWidget:
         """Why `du` disagrees with us.

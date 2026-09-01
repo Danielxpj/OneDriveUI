@@ -300,7 +300,8 @@ class PauseManager(QObject):
     # Enforcement
     # ═════════════════════════════════════════════════════════════════════════
 
-    def enforce(self, ep: RcEndpoint | None) -> int:
+    def enforce(self, ep: RcEndpoint | None, *,
+                reason: PauseReason | None = None) -> int:
         """Push every queued upload past the horizon. Called **every tick** while paused.
 
         Every tick, not once, because ``--vfs-write-back`` keeps adding items: a
@@ -321,7 +322,14 @@ class PauseManager(QObject):
             started, and counting it would make the UI claim a pause that did
             not happen.
         """
-        if ep is None or self.active() is PauseReason.NONE:
+        # `reason` overrides `active()`, which only ever reflects a *manual*
+        # pause: `_reason` is set by `pause()` and nothing else, while the
+        # metered, battery-saver and quota pauses are derived fresh from the
+        # environment on every tick and never recorded here. Gating on
+        # `active()` alone meant all three automatic pauses deferred nothing at
+        # all — the state said "Paused", and the upload queue drained anyway.
+        effective = reason if reason is not None else self.active()
+        if ep is None or effective is PauseReason.NONE:
             return 0
         try:
             deferred = vfs.defer_uploads(ep, DEFER_HORIZON_S)

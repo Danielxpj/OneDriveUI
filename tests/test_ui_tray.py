@@ -1,4 +1,4 @@
-"""WP-12b — `ui/tray.py`, `ui/notices.py`, `ui/filebrowser.py`.
+"""WP-12b — `ui/tray.py`, `ui/notices.py`.
 
 StatusNotifierItem is much less capable than `QSystemTrayIcon`'s API suggests,
 and each of its restrictions is a bug that looks like a Qt problem until you know
@@ -41,7 +41,6 @@ from onedriveui.models import (
 )
 from onedriveui.strings import MENU
 from onedriveui.ui import icons
-from onedriveui.ui.filebrowser import COLUMNS, PATH_ROLE, FileBrowser
 from onedriveui.ui.notices import (
     SETTING_FOR_TOAST,
     TOAST_FOR_STATE,
@@ -300,7 +299,7 @@ class TestTrayActions:
         banned = ("rc.vfs", "rc.ops", "rc.bisync", "data.repo_sync",
                   "data.repo_files")
         offenders = []
-        for name in ("tray.py", "notices.py", "filebrowser.py"):
+        for name in ("tray.py", "notices.py"):
             text = (REPO_ROOT / "onedriveui" / "ui" / name).read_text(
                 encoding="utf-8")
             tree = ast.parse(text)
@@ -446,98 +445,3 @@ class TestNotices:
 # The file browser
 # ═════════════════════════════════════════════════════════════════════════════
 
-class TestFileBrowser:
-
-    @pytest.fixture
-    def tree(self, tmp_path) -> AccountInfo:
-        root = tmp_path / "OneDrive"
-        (root / "Photos").mkdir(parents=True)
-        (root / "Photos" / "a.jpg").write_bytes(b"x" * 100)
-        (root / "notes.txt").write_text("hello")
-        return AccountInfo(id="onedrive", remote="onedrive", sync_root=str(root))
-
-    def test_it_shows_explorers_columns(self, qapp, tree):
-        browser = FileBrowser(tree)
-        assert [browser.model.horizontalHeaderItem(i).text()
-                for i in range(len(COLUMNS))] == list(COLUMNS)
-
-    def test_folders_sort_before_files(self, qapp, tree):
-        browser = FileBrowser(tree)
-        assert [browser.model.item(i, 0).text() for i in range(2)] == \
-            ["Photos", "notes.txt"]
-
-    def test_a_folder_is_not_read_until_it_is_expanded(self, qapp, tree):
-        """One Graph request per directory is what a recursive read costs on a
-        backend with ListR = false."""
-        browser = FileBrowser(tree)
-        photos = browser.model.item(0, 0)
-        assert photos.rowCount() == 1
-        assert photos.child(0).data(PATH_ROLE) is None      # a placeholder
-
-    def test_expanding_populates_it(self, qapp, tree):
-        browser = FileBrowser(tree)
-        photos = browser.model.item(0, 0)
-        browser._on_expanded(photos.index())
-        assert [photos.child(i, 0).text() for i in range(photos.rowCount())] == \
-            ["a.jpg"]
-
-    def test_the_status_column_is_one_query_per_directory(self, qapp, tree):
-        """Not one per row: a per-row lookup makes scrolling a large folder
-        visibly stutter, on the thread that is drawing it."""
-        calls: list[int] = []
-
-        class Counting:
-            def statuses(self, paths):
-                calls.append(len(paths))
-                return {p: type("S", (), {"state": FileState.LOCAL})()
-                        for p in paths}
-
-        FileBrowser(tree, filestate=Counting())
-        assert calls == [2]
-
-    def test_the_status_text_comes_from_strings(self, qapp, tree):
-        from onedriveui.strings import FILE_STATE_LABEL
-
-        class Local:
-            def statuses(self, paths):
-                return {p: type("S", (), {"state": FileState.LOCAL})()
-                        for p in paths}
-
-        browser = FileBrowser(tree, filestate=Local())
-        assert browser.model.item(0, 1).text() == \
-            FILE_STATE_LABEL[FileState.LOCAL.value]
-
-    def test_an_unknown_state_shows_no_label_rather_than_a_guess(self, qapp, tree):
-        browser = FileBrowser(tree)
-        assert browser.model.item(0, 1).text() == ""
-
-    def test_actions_go_through_do(self, qapp, tree):
-        supervisor = RecordingSupervisor()
-        browser = FileBrowser(tree, supervisor=supervisor)
-        browser._act(RecoveryAction.FREE_UP_SPACE, ["notes.txt"])
-        assert supervisor.actions[0][0] is RecoveryAction.FREE_UP_SPACE
-        assert supervisor.actions[0][1]["rel_path"] == "notes.txt"
-
-    def test_a_batch_acts_on_every_selected_path(self, qapp, tree):
-        supervisor = RecordingSupervisor()
-        browser = FileBrowser(tree, supervisor=supervisor)
-        browser._act(RecoveryAction.FREE_UP_SPACE, ["a", "b", "c"])
-        assert len(supervisor.actions) == 3
-
-    def test_there_is_no_horizontal_scrollbar(self, qapp, tree):
-        """A horizontal scrollbar in a file list is a layout bug the user has to
-        work around."""
-        from PySide6.QtCore import Qt as _Qt
-
-        browser = FileBrowser(tree)
-        assert browser.view.horizontalScrollBarPolicy() is \
-            _Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-
-    def test_rows_are_uniform_height_for_virtualisation(self, qapp, tree):
-        """Which is what lets the view scroll 5 000 rows without measuring each."""
-        assert FileBrowser(tree).view.uniformRowHeights() is True
-
-    def test_a_missing_folder_is_not_a_crash(self, qapp, tmp_path):
-        account = AccountInfo(id="x", remote="x",
-                              sync_root=str(tmp_path / "gone"))
-        assert FileBrowser(account).row_count() == 0

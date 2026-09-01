@@ -566,6 +566,14 @@ class MountController(QObject):
             MountLost: The mountpoint exists as a non-directory, so nothing can
                 be mounted there.
         """
+        # `mount.enabled` is a real setting and was read by nothing: an account
+        # configured with no mount got one anyway on the next start-up, which
+        # for a user who deliberately turned it off is the client undoing their
+        # decision — and mounting a remote is not a small side effect.
+        if not self.options_for(account).get("enabled", True):
+            log.info("mount is disabled for %s; not mounting", account.id)
+            return
+
         mountpoint = self.mountpoint(account)
         health = self.health(account)
         if health is MountHealth.UP:
@@ -591,7 +599,18 @@ class MountController(QObject):
         self._systemd.enable(unit)
         self._health[account.id] = MountHealth.STARTING
         BUS.mount_health.emit(account.id, MountHealth.STARTING)
-        self._systemd.start(unit)
+        # `restart`, not `start`. The unit text just written carries a NEW rc
+        # port and NEW credentials, and `start` on a unit systemd already counts
+        # as active is a silent no-op: the previous rclone keeps running on the
+        # previous port while the lines below record the new one and save it to
+        # `endpoints.json`. Everything that then drives the mount — vfs/stats,
+        # vfs/refresh, the pinner, the transfer poller — aims at a port nothing
+        # is listening on, and the mount looks dead while it is working fine.
+        #
+        # Safe here because a healthy mount already returned above: by this
+        # point the mount is DOWN, or was STALE and has just been detached, so
+        # there is no live VFS holding an upload for invariant I3 to protect.
+        self._systemd.restart(unit)
 
         ep = RcEndpoint(kind="mount", host="127.0.0.1", port=port, user=user,
                         password=password, mountpoint=str(mountpoint),
@@ -725,12 +744,53 @@ class MountController(QObject):
                     unit, delay_s, reason, len(history))
         self._schedule(int(delay_s * 1000), lambda: self._do_restart(account))
 
+    def rewrite_unit(self, account: AccountInfo) -> bool:
+        """Re-render this account's unit from the current mount options.
+
+        **This is what makes a settings change reach rclone.** The argv lives
+        only in the unit file, and the only place that file was ever written is
+        `ensure_mounted()` — which returns immediately when the mount is already
+        UP. So restarting a healthy mount re-executed the *old* command line,
+        and every parameter on the rclone settings page was saved, displayed,
+        and never applied.
+
+        The port and credentials are deliberately reused rather than re-minted:
+        anything already driving this mount — the transfer poller, the VFS
+        probe, the pinner — is pointed at that address, and moving it would
+        leave them all talking to a port nobody is listening on.
+
+        Args:
+            account: The account whose unit to re-render.
+
+        Returns:
+            True when the unit was rewritten. False when nothing is recorded
+            for this account yet, in which case `ensure_mounted()` is the call
+            that should be made instead.
+        """
+        endpoint = self.endpoint(account)
+        if endpoint is None or not endpoint.port:
+            return False
+        unit = self.unit_name(account)
+        self._systemd.write_unit(
+            unit, self.unit_text(account, endpoint.port,
+                                 (endpoint.user, endpoint.password)))
+        self._systemd.daemon_reload()
+        log.info("re-rendered %s from the current mount options", unit)
+        return True
+
     def _do_restart(self, account: AccountInfo) -> None:
         """The deferred half of :meth:`restart`, after the ladder delay."""
         mountpoint = self.mountpoint(account)
         if is_live(mountpoint) is MountHealth.STALE:
             fusermount_unmount(mountpoint, lazy=True)
         unit = self.unit_name(account)
+        try:
+            # Pick up any settings changed since the unit was written. Without
+            # this a restart is a no-op as far as configuration goes.
+            self.rewrite_unit(account)
+        except Exception:  # noqa: BLE001 - restart with the old argv beats not
+            log.warning("could not re-render %s; restarting it as it is", unit,
+                        exc_info=True)
         try:
             self._systemd.restart(unit)
         except Exception:                                      # noqa: BLE001

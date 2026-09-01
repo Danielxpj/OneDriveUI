@@ -48,6 +48,8 @@ the test module asserts that with an AST walk rather than a hopeful comment.
 
 from __future__ import annotations
 
+import logging
+
 from typing import Any, Protocol, Sequence
 
 from PySide6.QtCore import QPoint, QRect, Qt, Signal, Slot
@@ -78,6 +80,9 @@ from onedriveui.ui.widgets.indicators import (
     Avatar, FluentProgressBar, ProgressTone, StorageBar,
 )
 from onedriveui.ui.widgets.lists import ActivityListView
+
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "StatusSource", "StatusTables", "status_format_args", "pause_remaining",
@@ -414,6 +419,7 @@ class ActivityCenter(QWidget):
                  *,
                  supervisor: Any,
                  quota: Any = None,
+                 activity: Any = None,
                  status: StatusSource | None = None,
                  model: ActivityModel | None = None,
                  parent: QWidget | None = None) -> None:
@@ -422,6 +428,11 @@ class ActivityCenter(QWidget):
         self._account = account
         self._supervisor = supervisor
         self._quota = quota
+        #: The persisted activity rows come from here. Without it the flyout
+        #: showed only whatever arrived on the bus while it happened to be open:
+        #: `ActivityModel.set_history()` existed, worked, and had no caller, so
+        #: the `activity` table was written on every transfer and never read.
+        self._activity = activity
         self._status_source: StatusSource = status or StatusTables()
         self._state = SyncState.NOT_RUNNING
         self._facts = Facts(account_id=account.id)
@@ -619,7 +630,35 @@ class ActivityCenter(QWidget):
         self._list.setModel(self._model)
         self._list.setViewportMargins(0, SPACING["s"], 0, SPACING["s"])
         self._list.row_activated.connect(self.row_activated.emit)
+        # And act on it. The signal was re-emitted and nothing listened, so
+        # double-clicking a row in the activity list did nothing at all —
+        # the one gesture every file list in every desktop responds to.
+        self._list.row_activated.connect(self._on_row_activated)
         return self._list
+
+    def _on_row_activated(self, index: object) -> None:
+        """Reveal the file behind a double-clicked row in the file manager.
+
+        Through `do()`, like every other world-touching action here. A live
+        transfer and a persisted event name their path differently, so both are
+        asked; a row that names nothing (a daemon-restart marker, say) is simply
+        ignored rather than opening the wrong thing.
+        """
+        row = getattr(index, "row", None)
+        if not callable(row):
+            return
+        position = row()
+        source = self._model.source_at(position)
+        rel_path = getattr(source, "rel_path", "") or getattr(source, "name", "")
+        if not rel_path or self._supervisor is None:
+            return
+        from pathlib import Path as _Path
+
+        target = _Path(self._account.sync_root).expanduser() / rel_path
+        try:
+            self._supervisor.do(RecoveryAction.SHOW_IN_FOLDER, path=str(target))
+        except Exception:  # noqa: BLE001 - a refusal must not close the flyout
+            log.warning("could not reveal %s", target, exc_info=True)
 
     def _build_footer(self) -> QWidget:
         """Open folder / View online / Recycle bin … Settings / Help."""
@@ -720,16 +759,22 @@ class ActivityCenter(QWidget):
         With animations off — both desktop settings are false on this machine —
         the fade collapses to 0 ms and the window simply appears.
         """
+        was_visible = self.isVisible()
         self.refresh()
         self.adjust_height()
         self.move(self.placement(anchor))
         self.show()
         self.raise_()
         self.activateWindow()
-        motion.fade_in(self._surface, duration="flyout")
+        if not was_visible:
+            # Asking for an open flyout again is a request to bring it forward,
+            # not to play its entrance a second time. Fading a window the user
+            # is already looking at reads as a blink.
+            motion.fade_in(self._surface, duration="flyout")
 
     def refresh(self) -> None:
-        """Re-read the supervisor and the quota, then re-render everything."""
+        """Re-read the supervisor, the quota and the history, then re-render."""
+        self._load_history()
         snapshot = self._supervisor.snapshot()
         if snapshot is not None:
             self.set_state(snapshot.state, snapshot.facts)
@@ -751,6 +796,20 @@ class ActivityCenter(QWidget):
         self._email.setText(account.email)
         self._email.setVisible(bool(account.email))
         self._avatar.set_person(name)
+
+    def _load_history(self) -> None:
+        """Fill the model from the persisted activity table.
+
+        Read on open rather than held live: the flyout is closed most of the
+        time, and re-reading a few dozen rows when it appears is cheaper than
+        keeping a subscription alive for a window nobody is looking at.
+        """
+        if self._activity is None:
+            return
+        try:
+            self._model.set_history(self._activity.recent())
+        except Exception:  # noqa: BLE001 - an empty list beats no window
+            log.warning("could not read the activity history", exc_info=True)
 
     def set_state(self, state: SyncState, facts: Facts | None = None) -> None:
         """Move the status strip, the glyph, the tooltip and the banner.

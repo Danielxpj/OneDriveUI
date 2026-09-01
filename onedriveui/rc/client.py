@@ -475,6 +475,18 @@ class RcClient(QObject):
             call._emit_success(body)
         finally:
             reply.deleteLater()
+            # And the call itself. It is parented to the client, so Qt keeps it
+            # alive for the whole process otherwise — one QObject plus its
+            # decoded response body per rc call, forever. That was survivable
+            # while nothing polled; it is not now that the transfer poller and
+            # the VFS probe each issue a request every few hundred milliseconds.
+            #
+            # `deleteLater()` and not `del`: the signals above were emitted
+            # inside this frame, so the slots are still on the stack. The event
+            # loop deletes it once they have unwound. `delivered` is a plain
+            # Python attribute, so a caller holding the wrapper can still read
+            # it afterwards to tell "answered" from "abandoned".
+            call.deleteLater()
 
     # ── lifecycle ───────────────────────────────────────────────────────────
 
@@ -705,8 +717,15 @@ class JobWatcher(QObject):
         if call is not None:
             if slots is not None:
                 on_ok, on_err = slots
-                call.succeeded.disconnect(on_ok)
-                call.failed.disconnect(on_err)
+                try:
+                    call.succeeded.disconnect(on_ok)
+                    call.failed.disconnect(on_err)
+                except (RuntimeError, TypeError):
+                    # The call has already been delivered and `deleteLater()`d
+                    # by `_on_finished`, so its C++ side is gone and there is
+                    # nothing left to disconnect. Qt dropped the connections
+                    # when it destroyed the sender.
+                    pass
             abort = getattr(call, "abort", None)
             if callable(abort):
                 abort()

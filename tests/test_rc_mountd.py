@@ -411,15 +411,22 @@ class TestIsLive:
         assert is_live(target) is MountHealth.UP
 
     @pytest.mark.live
-    def test_the_real_mount_carries_a_hash_suffixed_device_name(self):
-        """Evidence for invariant I1: the live mount was started with
-        `--onedrive-chunk-size 30M`, so its fs is `onedrive{MxOuf}:` and its VFS
-        cache lives in a different directory from `onedrive:`'s."""
+    def test_the_real_mount_carries_no_hash_suffixed_device_name(self):
+        """Invariant I1, measured on the live mount.
+
+        This test used to assert the opposite, and was right to: the mount at
+        `~/OneDrive` was started by hand with `--onedrive-chunk-size 30M` on the
+        command line, which renames the filesystem to `onedrive{MxOuf}:` and
+        puts its VFS cache in a directory `onedrive:` will never look in — two
+        abandoned cache trees were the evidence. OneDriveUI now owns that
+        mountpoint and passes backend options through the rclone config, where
+        they do not become part of the fs name. A `{` here means the defect is
+        back."""
         names = [fs for fs, mount in rclone_mounts()
                  if mount == REAL_HOME / "OneDrive"]
         if not names:
             pytest.skip("no fuse.rclone mount at ~/OneDrive on this machine")
-        assert names[0].startswith("onedrive")
+        assert "{" not in names[0], f"backend flags leaked: {names[0]}"
 
 
 # ═════════════════════════════════════════════════════════════════════════════

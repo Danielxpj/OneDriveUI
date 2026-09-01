@@ -131,6 +131,10 @@ class IpcClient:
     — which is exactly the answer we want.
     """
 
+    #: Called with the paths named by an ``invalidate`` push. Set by the
+    #: provider, which owns the cache those paths live in.
+    on_invalidate = None
+
     def __init__(self, path: str = SOCKET_PATH, timeout_s: float = TIMEOUT_S):
         self.path = path
         self.timeout_s = timeout_s
@@ -180,8 +184,24 @@ class IpcClient:
                     frame = json.loads(line.decode("utf-8"))
                 except ValueError:
                     return None
-                if isinstance(frame, dict) and frame.get("op") != "invalidate":
-                    return frame
+                if not isinstance(frame, dict):
+                    continue
+                if frame.get("op") == "invalidate":
+                    # Not noise to be skipped: this is the server telling us a
+                    # badge is stale. Dropping it meant a file that finished
+                    # uploading kept its syncing emblem until the folder was
+                    # reopened — the one thing `invalidate()` exists to prevent,
+                    # and the reason it had no caller.
+                    if self.on_invalidate is not None:
+                        targets = frame.get("paths")
+                        if isinstance(targets, list):
+                            try:
+                                self.on_invalidate(
+                                    [t for t in targets if isinstance(t, str)])
+                            except Exception:
+                                pass
+                    continue
+                return frame
         return None
 
     def states(self, paths: list[str]) -> dict[str, str]:
@@ -235,6 +255,9 @@ class OneDriveUIProvider(GObject.GObject,
         #: Absolute path -> state, filled by `update_file_info` and read by it.
         #: The only reason a synchronous hook can be fast enough.
         self._cache: dict[str, str] = {}
+        # The client discards `invalidate` pushes unless someone is listening,
+        # and this provider owns the cache those pushes are about.
+        _client().on_invalidate = self.invalidate
 
     # ═════════════════════════════════════════════════════════════════════════
     # InfoProvider

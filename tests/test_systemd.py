@@ -22,8 +22,31 @@ from onedriveui.constants import UNIT_BISYNC_TMPL, UNIT_MOUNT_TMPL, UNIT_RCD
 from onedriveui.errors import OneDriveUIError, SafetyRefusal
 from onedriveui.platform import systemd as SD
 
+def _live_mount_unit() -> str:
+    """Whichever rclone mount unit this machine is actually running.
+
+    Discovered, not named. It used to be hard-coded to `rclone-onedrive.service`
+    — the user's own hand-written unit — which made every live test below fail
+    the day OneDriveUI took that mountpoint over and retired it. The tests want
+    "a real unit, running right now" as a specimen; which one that is belongs to
+    the machine, not to this file.
+
+    Returns:
+        The first active mount unit found, falling back to the legacy name so
+        the `SD.exists()` skip in each test still does the right thing.
+    """
+    candidates = sorted(
+        u.name for u in (paths.systemd_user_dir()).glob("onedriveui-mount@*.service")
+    ) if hasattr(paths, "systemd_user_dir") else []
+    candidates.append("rclone-onedrive.service")
+    for name in candidates:
+        if SD.exists(name) and SD.is_active(name):
+            return name
+    return "rclone-onedrive.service"
+
+
 #: A unit the user already runs. Read-only in every live test below.
-LIVE_UNIT = "rclone-onedrive.service"
+LIVE_UNIT = _live_mount_unit()
 
 GOOD_UNIT = """[Unit]
 Description=OneDriveUI rclone control plane

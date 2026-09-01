@@ -35,7 +35,7 @@ from typing import Any
 from PySide6.QtCore import QObject, Signal
 
 from onedriveui.bus import BUS
-from onedriveui.errors import DaemonUnavailable, RcError
+from onedriveui.errors import DaemonUnavailable, RcError, SafetyRefusal
 from onedriveui.models import AccountInfo, AccountKind, RcEndpoint, utcnow_iso
 from onedriveui.rc import auth, conf, ops
 
@@ -107,6 +107,7 @@ class AccountManager(QObject):
         endpoint: Any = None,
         config_path: Any = None,
         sync_root_for: Any = None,
+        stop_mount: Any = None,
         writer: Any = None,
         parent: QObject | None = None,
     ) -> None:
@@ -114,6 +115,9 @@ class AccountManager(QObject):
         self._endpoint = endpoint or (lambda: None)
         self._config_path = config_path
         self._sync_root_for = sync_root_for or _default_sync_root
+        #: ``(account) -> None`` stopping that account's mount unit. Injected,
+        #: because this module must not depend on the rc layer.
+        self._stop_mount = stop_mount
         self._writer = writer
         self._runtimes: dict[str, AccountRuntime] = {}
 
@@ -270,6 +274,27 @@ class AccountManager(QObject):
         if runtime is not None and runtime.supervisor is not None:
             runtime.supervisor.stop()
 
+        # The mount unit, which the docstring above promises is stopped before
+        # the credentials go and which nothing was stopping. An `rclone mount`
+        # left running against a remote that has just been deleted from
+        # `rclone.conf` does not stop: it keeps serving the mountpoint and
+        # raises auth errors on every operation, which is exactly the "notice
+        # its token vanish" case the ordering exists to prevent.
+        if self._stop_mount is not None:
+            try:
+                self._stop_mount(account)
+            except SafetyRefusal:
+                # Invariant I3: an upload is in flight, and those bytes exist
+                # nowhere else. Deleting the credentials now would strand them
+                # permanently — the mount would keep running with a token it can
+                # no longer refresh. The unlink waits.
+                log.error("not unlinking %s: the mount refused to stop while an "
+                          "upload was in flight", account.id)
+                raise
+            except Exception:  # noqa: BLE001 - a stuck mount must not block unlink
+                log.warning("could not stop the mount for %s before unlinking",
+                            account.id, exc_info=True)
+
         endpoint = self._endpoint()
         removed = False
         if endpoint is not None:
@@ -280,6 +305,15 @@ class AccountManager(QObject):
                           account.remote, exc_info=True)
         else:
             log.warning("no daemon to unlink %s through", account.remote)
+
+        if not removed:
+            # Saying "unlinked" when `config/delete` failed leaves the user
+            # believing their credentials are gone from this machine when they
+            # are still on disk. The mount is down either way, so the honest
+            # report is that the account is still linked.
+            log.error("could not unlink %s; its credentials are still in "
+                      "rclone.conf", account.id)
+            return False
 
         log.info("unlinked %s; every file under %s was left untouched",
                  account.id, account.sync_root)

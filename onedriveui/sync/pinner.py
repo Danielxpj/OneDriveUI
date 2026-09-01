@@ -223,8 +223,20 @@ class Pinner(QObject):
                         exc_info=True)
             return 0
 
+        # A folder needs `evict_tree`, which checks every item under the prefix
+        # against invariant I3 *before* unlinking any of them. `evict` on a
+        # directory finds no sidecar and returns zero, so "Free up space" on a
+        # folder — which is how the file-manager menu is almost always used —
+        # reclaimed nothing at all and said so with a silent 0.
+        target = Path(self.account.sync_root).expanduser() / rel_path
         try:
-            freed = vfs.evict(info, rel_path, queue_names)
+            is_folder = target.is_dir()
+        except OSError:
+            is_folder = False
+
+        try:
+            freed = (vfs.evict_tree(info, rel_path, queue_names) if is_folder
+                     else vfs.evict(info, rel_path, queue_names))
         except SafetyRefusal as refusal:
             self._refuse(rel_path, str(refusal))
             return 0

@@ -52,21 +52,30 @@ from onedriveui.bus import BUS
 from onedriveui.constants import TICK_ACTIVE_MS, TICK_IDLE_MS, TICK_PAUSED_MS
 from onedriveui.data import repo_sync
 from onedriveui.data.writer import DbWriter
-from onedriveui.errors import DaemonUnavailable, RcError, classify, is_benign
+from onedriveui.errors import (
+    DaemonUnavailable,
+    RcError,
+    SafetyRefusal,
+    classify,
+    is_benign,
+)
 from onedriveui.models import (
     ActivityEvent,
     ActivityState,
     ActivityVerb,
     CoreStats,
+    DiskCacheInfo,
     RcEndpoint,
     TransferInfo,
     utcnow_iso,
 )
 from onedriveui.rc.client import call_blocking
+from onedriveui.rc.vfs import parse_disk_cache
 
 __all__ = [
     "SEEN_CAP",
     "StatsPoller",
+    "VfsStatsPoller",
     "dedupe_key",
     "direction_for",
     "drain_transferred",
@@ -563,6 +572,11 @@ class StatsPoller(QObject):
         self._seen_order: list[str] = []
         self._in_flight = False
         self._draining = False
+        #: The request currently outstanding, so `poll_once` can tell "still
+        #: running" from "aborted and will never answer".
+        self._call: Any = None
+        #: The same, for the `core/transferred` drain.
+        self._drain_call: Any = None
         #: Bumped by stop() and set_group(); a reply from an older generation is
         #: discarded, so nothing is emitted after the poller was told to stop.
         self._generation = 0
@@ -614,7 +628,9 @@ class StatsPoller(QObject):
         self._timer.stop()
         self._generation += 1
         self._in_flight = False
+        self._call = None
         self._draining = False
+        self._drain_call = None
 
     def set_interval(self, ms: int | None) -> int:
         """Pin or unpin the poll interval.
@@ -647,6 +663,7 @@ class StatsPoller(QObject):
         self._generation += 1
         self._in_flight = False
         self._draining = False
+        self._call = None
         self._last = CoreStats()
         self._last_transfers = ()
 
@@ -656,16 +673,27 @@ class StatsPoller(QObject):
         """Issue one ``core/stats``. Never blocks; the answer arrives by signal.
 
         A poll is skipped while the previous one is still in flight, so a
-        stalled daemon cannot build a backlog of requests.
+        stalled daemon cannot build a backlog of requests — but only while it
+        really is in flight. ``RcCall.abort()`` emits **no signal**, and
+        ``RcClient.set_endpoint()`` aborts everything outstanding, so a poller
+        that trusted the latch alone stopped polling forever the first time the
+        client was re-pointed at a restarted daemon. The tracked call's
+        ``delivered`` flag is the ground truth: set by success, failure and
+        abort alike, so a latch still standing over a delivered call means the
+        reply was abandoned and the next poll may proceed.
         """
         if self._in_flight:
-            return
+            call = self._call
+            if call is not None and not call.delivered:
+                return
+            self._in_flight = False
         params: dict[str, Any] = {}
         if self._group:
             params["group"] = self._group
         self._in_flight = True
         generation = self._generation
         call = self._client.call("core/stats", params)
+        self._call = call
         call.succeeded.connect(
             lambda body: self._on_stats(body, generation))
         call.failed.connect(
@@ -719,14 +747,21 @@ class StatsPoller(QObject):
 
     def _drain_async(self) -> None:
         """Read ``core/transferred`` without blocking the GUI thread."""
+        # The same abort cross-check the poll latch needs: `RcCall.abort()`
+        # emits nothing, so a drain interrupted by `set_endpoint()` would leave
+        # this latched and no completed transfer would ever be persisted again.
         if self._draining:
-            return
+            call = self._drain_call
+            if call is not None and not call.delivered:
+                return
+            self._draining = False
         params: dict[str, Any] = {}
         if self._group:
             params["group"] = self._group
         self._draining = True
         generation = self._generation
         call = self._client.call("core/transferred", params)
+        self._drain_call = call
         call.succeeded.connect(
             lambda body: self._on_transferred(body, generation))
         call.failed.connect(
@@ -736,6 +771,7 @@ class StatsPoller(QObject):
         if generation not in (-1, self._generation):
             return
         self._draining = False
+        self._drain_call = None
         events = transferred_events(body, account_id=self._account_id,
                                     group=self._group, seen=self._seen)
         self._trim_seen(events)
@@ -748,6 +784,7 @@ class StatsPoller(QObject):
         if generation not in (-1, self._generation):
             return
         self._draining = False
+        self._drain_call = None
         log.info("core/transferred poll failed: %s", error)
 
     def drain_now(self) -> None:
@@ -811,3 +848,173 @@ class StatsPoller(QObject):
         for key in self._seen_order[:overflow]:
             self._seen.discard(key)
         del self._seen_order[:overflow]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# vfs/stats — the upload queue
+# ═════════════════════════════════════════════════════════════════════════════
+
+class VfsStatsPoller(QObject):
+    """Poll a mount's ``vfs/stats`` and keep the latest ``DiskCacheInfo``.
+
+    The counter that decides whether the tray says "Syncing" or "Up to date" is
+    ``diskCache.uploadsQueued`` plus ``uploadsInProgress``: a file written into
+    the mount lands in the VFS cache first and is uploaded behind the user's
+    back, so the *mount* is the only process that knows an upload is pending.
+    Neither the control daemon nor the filesystem shows it.
+
+    `FactCollector._read_vfs` samples this rather than fetching it, and says so:
+    "``vfs/stats`` is a network round trip to the mount daemon, and ARCHITECTURE
+    §7.1 bans synchronous ones on this thread; the Supervisor refreshes the
+    value and this samples it." This class is that refresher. It issues the
+    request through :class:`~onedriveui.rc.client.RcClient`, so nothing blocks
+    and the answer arrives by signal on the GUI thread.
+
+    The cadence follows the queue, like :class:`StatsPoller`'s: fast while
+    anything is uploading, slow when the queue is empty. An idle mount is the
+    common case and polling it four times a second would be pure waste.
+
+    Attributes:
+        vfs_updated: ``(DiskCacheInfo)`` — every successful poll.
+        failed: ``(object)`` — a poll that errored. Polling continues; a mount
+            that is briefly unreachable is a normal condition and the state
+            machine counts the failures itself.
+    """
+
+    vfs_updated = Signal(object)
+    failed = Signal(object)
+
+    def __init__(self, client: Any, *, idle_ms: int = TICK_IDLE_MS,
+                 active_ms: int = TICK_ACTIVE_MS,
+                 paused_ms: int = TICK_PAUSED_MS,
+                 parent: QObject | None = None) -> None:
+        """
+        Args:
+            client: The :class:`~onedriveui.rc.client.RcClient` pointed at the
+                **mount's** rc endpoint, not the control plane's. Not owned.
+            idle_ms: Interval with an empty upload queue.
+            active_ms: Interval while anything is queued or uploading.
+            paused_ms: Interval while sync is paused.
+            parent: Qt parent.
+        """
+        super().__init__(parent)
+        self._client = client
+        self._idle_ms = max(1, int(idle_ms))
+        self._active_ms = max(1, int(active_ms))
+        self._paused_ms = max(1, int(paused_ms))
+        self._paused = False
+        self._last: DiskCacheInfo | None = None
+        self._in_flight = False
+        #: The outstanding request; see `poll_once`.
+        self._call: Any = None
+        #: Bumped by `stop()`; a reply from an older generation is discarded.
+        self._generation = 0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self.poll_once)
+
+    # ── state ───────────────────────────────────────────────────────────────
+
+    @property
+    def last(self) -> DiskCacheInfo | None:
+        """The most recent successful sample, or ``None`` before the first.
+
+        ``None`` is not zero, and `FactCollector` treats it that way: an
+        unanswered ``vfs/stats`` means "we do not know whether anything is
+        queued", which must never be reported as "nothing is queued".
+        """
+        return self._last
+
+    @property
+    def running(self) -> bool:
+        """Is the timer armed?"""
+        return self._timer.isActive()
+
+    @property
+    def interval_ms(self) -> int:
+        """The interval currently in force."""
+        return self._timer.interval()
+
+    # ── control ─────────────────────────────────────────────────────────────
+
+    def start(self, interval_ms: int | None = None) -> None:
+        """Begin polling, with one immediate sample.
+
+        Args:
+            interval_ms: Pin the interval, or ``None`` to adapt.
+        """
+        self._timer.start(int(interval_ms) if interval_ms
+                          else self._choose_interval())
+        self.poll_once()
+
+    def stop(self) -> None:
+        """Stop polling and discard any reply still in flight."""
+        self._timer.stop()
+        self._generation += 1
+        self._in_flight = False
+        self._call = None
+
+    def set_paused(self, paused: bool) -> None:
+        """Tell the poller sync is paused, so it drops to the slow rate."""
+        self._paused = bool(paused)
+        self._apply_interval(self._choose_interval())
+
+    # ── polling ─────────────────────────────────────────────────────────────
+
+    def poll_once(self) -> None:
+        """Issue one ``vfs/stats``. Never blocks; the answer arrives by signal.
+
+        Skipped while the previous request is still in flight, so a stalled
+        mount cannot build a backlog — but only while it really is in flight.
+        See :meth:`StatsPoller.poll_once`: an aborted ``RcCall`` emits nothing,
+        so the latch is cross-checked against the call's ``delivered`` flag.
+        """
+        if self._in_flight:
+            call = self._call
+            if call is not None and not call.delivered:
+                return
+            self._in_flight = False
+        self._in_flight = True
+        generation = self._generation
+        call = self._client.call("vfs/stats", {})
+        self._call = call
+        call.succeeded.connect(lambda body: self._on_stats(body, generation))
+        call.failed.connect(lambda error: self._on_failed(error, generation))
+
+    def _on_stats(self, body: dict, generation: int = -1) -> None:
+        if generation not in (-1, self._generation):
+            return
+        self._in_flight = False
+        try:
+            info = parse_disk_cache(body)
+        except SafetyRefusal:
+            # `--vfs-cache-mode off`: there is no cache and no upload queue to
+            # report. Not an error, and not something to keep retrying loudly.
+            self._last = None
+            self._apply_interval(self._idle_ms)
+            return
+        self._last = info
+        self.vfs_updated.emit(info)
+        self._apply_interval(self._choose_interval())
+
+    def _on_failed(self, error: object, generation: int = -1) -> None:
+        if generation not in (-1, self._generation):
+            return
+        self._in_flight = False
+        # Deliberately NOT clearing `_last`. A single missed poll does not mean
+        # the queue emptied; keeping the previous sample stops the tray from
+        # flickering to "Up to date" every time the mount is briefly busy.
+        self.failed.emit(error)
+
+    def _choose_interval(self) -> int:
+        if self._paused:
+            return self._paused_ms
+        info = self._last
+        if info is None:
+            return self._idle_ms
+        busy = bool(info.uploads_queued or info.uploads_in_progress)
+        return self._active_ms if busy else self._idle_ms
+
+    def _apply_interval(self, ms: int) -> int:
+        if self._timer.interval() != ms:
+            self._timer.setInterval(ms)
+        return ms

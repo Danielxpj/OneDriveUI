@@ -73,6 +73,7 @@ __all__ = [
     "data_path",
     "defer_uploads",
     "disk_cache_info",
+    "parse_disk_cache",
     "entry_for",
     "evict",
     "evict_tree",
@@ -161,7 +162,30 @@ def disk_cache_info(ep: RcEndpoint, *, timeout_s: float = 4.0) -> DiskCacheInfo:
         RcError: The daemon answered an error envelope.
         DaemonUnavailable: The daemon did not answer.
     """
-    stats = call_blocking(ep, "vfs/stats", {}, timeout_s=timeout_s)
+    return parse_disk_cache(call_blocking(ep, "vfs/stats", {},
+                                          timeout_s=timeout_s))
+
+
+def parse_disk_cache(stats: Mapping[str, Any]) -> DiskCacheInfo:
+    """Turn a ``vfs/stats`` body into a :class:`DiskCacheInfo`.
+
+    Split out of :func:`disk_cache_info` so the same parse serves the blocking
+    read and the asynchronous one. The tray needs these counters every couple of
+    seconds — that is what tells it an upload is in flight — and ARCHITECTURE
+    §7.6 bans synchronous HTTP on the GUI thread, so the polling path issues the
+    request through :class:`~onedriveui.rc.client.RcClient` and lands here with
+    the body already in hand. Keeping the parse pure means neither path can
+    drift from the other, and this module stays free of Qt.
+
+    Args:
+        stats: The decoded ``vfs/stats`` response.
+
+    Returns:
+        The cache description, both absolute paths included.
+
+    Raises:
+        SafetyRefusal: invariant ``"I4"`` — see :func:`disk_cache_info`.
+    """
     path, path_meta = guards.assert_cache_paths_from_stats(stats)
     disk: Mapping[str, Any] = stats.get("diskCache") or {}
     return DiskCacheInfo(

@@ -36,6 +36,7 @@ import os
 import tempfile
 from pathlib import Path
 from types import TracebackType
+from collections.abc import Callable
 from typing import Any, Final
 
 from onedriveui.paths import DIR_MODE, FILE_MODE
@@ -205,6 +206,19 @@ def atomic_write_json(
                               mode=mode, sync_dir=sync_dir)
 
 
+def _worth_keeping(keep_if: Callable[[bytes], bool], previous: bytes) -> bool:
+    """Run the caller's predicate, treating a raised exception as "no".
+
+    A predicate that blows up on the bytes it was handed has, in effect,
+    answered: whatever is in that file is not something to promote to the
+    backup.
+    """
+    try:
+        return bool(keep_if(previous))
+    except Exception:  # noqa: BLE001 - see the docstring
+        return False
+
+
 def backup_then_write(
     path: Path | str,
     data: bytes | str,
@@ -212,6 +226,7 @@ def backup_then_write(
     mode: int = FILE_MODE,
     suffix: str = BAK_SUFFIX,
     encoding: str = "utf-8",
+    keep_if: Callable[[bytes], bool] | None = None,
 ) -> Path:
     """Rotate the existing file to ``<name><suffix>``, then atomically write.
 
@@ -228,6 +243,16 @@ def backup_then_write(
         mode: Permissions for both the backup and the finished file.
         suffix: The backup suffix. ``.bak`` per ARCHITECTURE §9.
         encoding: Encoding used when `data` is a string.
+        keep_if: Given the bytes currently in `path`, return True if they are
+            worth keeping as the backup. When it returns False the existing
+            backup is left **untouched** rather than replaced.
+
+            This is what stops a recovery from eating its own lifeline. The
+            sequence is: `config.json` is corrupt, `load()` falls back to
+            `config.json.bak` and returns the good settings, the application
+            then saves — and an unconditional rotation copies the *corrupt*
+            `config.json` over the good `.bak` that had just saved it. One more
+            bad write and both copies are gone.
 
     Returns:
         The destination path.
@@ -240,7 +265,8 @@ def backup_then_write(
             previous = target.read_bytes()
         except OSError:
             previous = None
-        if previous is not None:
+        if previous is not None and (keep_if is None or _worth_keeping(keep_if,
+                                                                       previous)):
             # The backup is itself written atomically: a crash here must not
             # destroy the only good copy while the real target is still valid.
             atomic_write_bytes(target.with_name(target.name + suffix),

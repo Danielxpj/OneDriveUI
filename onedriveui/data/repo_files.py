@@ -816,6 +816,33 @@ def mark_restored(
                                        label="mark_restored"))
 
 
+def forget_trashed(
+    trash_id: int,
+    *,
+    writer: DbWriter | None = None,
+    timeout_ms: int = 5_000,
+) -> bool:
+    """Drop a trash row whose bytes have been permanently deleted.
+
+    Args:
+        trash_id: The row to forget.
+        writer: The writer to submit to.
+        timeout_ms: How long to wait for the commit.
+
+    Returns:
+        True when a row was removed.
+
+    A purged item exists nowhere any more, so leaving its row behind lists it to
+    the user as restorable and hands it back to the next purge sweep for ever.
+    """
+    def op(conn: sqlite3.Connection) -> int:
+        return int(conn.execute("DELETE FROM trashbin WHERE id = ?",
+                                (int(trash_id),)).rowcount)
+
+    return bool(_w(writer).submit_sync(op, timeout_ms, urgent=False,
+                                       label="forget_trashed"))
+
+
 def purge_due(
     account_id: str,
     *,

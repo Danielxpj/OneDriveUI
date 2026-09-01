@@ -639,10 +639,14 @@ def test_fuse_rclone_mounts_finds_the_live_onedrive_mount():
     points = [point for _fs, point in mounts]
     assert expected in points, f"{expected} not among {points}"
     fs_name = next(fs for fs, point in mounts if point == expected)
-    #: The device field carries rclone's {HASH} suffix; strip it for display,
-    #: never before comparing.
-    assert fs_name.startswith("onedrive")
-    assert fs_name.endswith(":")
+    #: The device field is whatever the mount was started with: the fs string
+    #: (`onedrive:`) for a mount with no `--devname`, or the device name itself
+    #: (`OneDrive`) for one of ours, which always passes `--devname` so the file
+    #: manager shows a name rather than a remote. Both are legitimate; a `{HASH}`
+    #: suffix is not, because it means a backend flag reached the command line
+    #: and took the VFS cache directory with it (invariant I1).
+    assert fs_name
+    assert "{" not in fs_name, f"backend flags leaked onto the mount: {fs_name}"
 
 
 @pytest.mark.live

@@ -302,12 +302,11 @@ class TestSafetyAborts:
         """The BUILD_PLAN's acceptance case, and the most important refusal in
         the project: rclone stopped because a quarter of the drive was about to
         disappear, and re-running with --force is not ours to decide."""
-        from onedriveui.rc import bisync
-
-        monkeypatch.setattr(bisync, "start",
-                            lambda *a, **kw: pytest.fail("ran bisync on an abort"))
-        monkeypatch.setattr(bisync, "build_argv",
-                            lambda *a, **kw: pytest.fail("built an argv on an abort"))
+        # The guards that used to assert "no rclone command was issued" patched
+        # `rc.bisync`, which no longer exists: this client has no two-way sync
+        # engine, so there is nothing left that *could* re-run on an abort. The
+        # decision half of the case — that a mass-delete abort raises exactly
+        # one decision and answers nothing on its own — is what still matters.
 
         centre = DecisionCenter(ACCOUNT, writer=store)
         run = RunRecord(run_id="r1", account_id=ACCOUNT.id, kind=RunKind.BISYNC,

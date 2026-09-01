@@ -36,12 +36,6 @@ from onedriveui.models import (
     TokenHealth,
     utcnow_iso,
 )
-from onedriveui.sync.conflicts import (
-    ConflictDetector,
-    conflict_suffix,
-    device_name,
-    rename_for_conflict,
-)
 from onedriveui.sync.issues import AUTO_RESOLVE, IssueEngine
 from onedriveui.sync.preflight import Violation
 
@@ -382,93 +376,3 @@ class TestExecute:
 # Conflicts
 # ═════════════════════════════════════════════════════════════════════════════
 
-class TestConflictNaming:
-
-    def test_the_suffix_is_this_machines_short_hostname(self):
-        """The BUILD_PLAN's acceptance case, against the real machine."""
-        assert conflict_suffix() == "-" + socket.gethostname().split(".")[0]
-
-    def test_a_fully_qualified_name_is_shortened(self, monkeypatch):
-        """Windows uses the NetBIOS-style computer name. Getting this wrong
-        produces `Budget-laptop.lan.xlsx`, which some programs read as a
-        different extension."""
-        monkeypatch.setattr(socket, "gethostname", lambda: "laptop.lan.example")
-        assert device_name() == "laptop"
-
-    def test_the_suffix_goes_before_the_extension(self):
-        """Appending after it makes the file stop opening in the program that
-        wrote it — precisely the outcome "keep both" exists to avoid."""
-        assert rename_for_conflict("Docs/Budget.xlsx", "laptop") == \
-            "Docs/Budget-laptop.xlsx"
-
-    def test_a_file_with_no_extension_still_works(self):
-        assert rename_for_conflict("README", "laptop") == "README-laptop"
-
-
-class TestConflictDetection:
-
-    def detector(self, store, **kw):
-        kw.setdefault("device", "laptop")
-        return ConflictDetector(ACCOUNT, writer=store, **kw)
-
-    def test_a_conflict_is_recorded_and_announced(self, qapp, store, bus_spy):
-        bus_spy.watch("conflict_detected")
-        conflict = self.detector(store).record("Docs/Budget.xlsx")
-        assert conflict.rel_path == "Docs/Budget.xlsx"
-        assert conflict.loser_path == "Docs/Budget-laptop.xlsx"
-        assert bus_spy.count("conflict_detected") == 1
-
-    def test_rclones_own_conflict_files_are_found_on_disk(self, qapp, store, tmp_path):
-        """The durable half of detection: it survives a crash, a rotated log and
-        a machine that was off while the other one synced."""
-        (tmp_path / "Budget.xlsx.conflict1").write_text("x")
-        found = self.detector(store).from_tree(tmp_path)
-        assert [c.rel_path for c in found] == ["Budget.xlsx"]
-
-    def test_our_own_conflict_files_are_found_too(self, qapp, store, tmp_path):
-        (tmp_path / "Budget-laptop.xlsx").write_text("x")
-        found = self.detector(store).from_tree(tmp_path)
-        assert [c.rel_path for c in found] == ["Budget.xlsx"]
-
-    def test_ordinary_files_are_not_conflicts(self, qapp, store, tmp_path):
-        (tmp_path / "Budget.xlsx").write_text("x")
-        (tmp_path / "notes-2026.txt").write_text("x")
-        assert self.detector(store).from_tree(tmp_path) == []
-
-    def test_ask_raises_an_issue_with_the_three_answers(self, qapp, store):
-        """A conflict is not a destructive gate — both copies already exist and
-        nothing is blocked. It is an issue with three fixes."""
-        eng = engine(store)
-        self.detector(store, policy=ConflictPolicy.ASK,
-                      issues=eng).record("Docs/Budget.xlsx")
-        issue = eng.open_issues()[0]
-        assert issue.code is IssueCode.CONFLICT
-        assert set(issue.actions) == {RecoveryAction.KEEP_BOTH,
-                                      RecoveryAction.KEEP_LOCAL,
-                                      RecoveryAction.KEEP_CLOUD}
-
-    def test_keep_both_asks_nothing(self, qapp, store):
-        eng = engine(store)
-        self.detector(store, policy=ConflictPolicy.KEEP_BOTH,
-                      issues=eng).record("Docs/Budget.xlsx")
-        assert eng.open_issues() == []
-
-    def test_resolving_records_which_answer(self, qapp, store):
-        """"A conflict was resolved" tells the user nothing; "kept the version
-        on this PC" tells them what happened to their file."""
-        detector = self.detector(store)
-        conflict = detector.record("Docs/Budget.xlsx")
-        detector.resolve(conflict.id, "keep_local")
-        assert detector.open_conflicts() == []
-
-    def test_neither_policy_deletes_a_version(self, qapp, store, tmp_path):
-        """"Newest wins" is not offered at all — it is the one resolution that
-        silently destroys work."""
-        winner = tmp_path / "Budget.xlsx"
-        loser = tmp_path / "Budget-laptop.xlsx"
-        winner.write_text("mine")
-        loser.write_text("theirs")
-        for policy in (ConflictPolicy.ASK, ConflictPolicy.KEEP_BOTH):
-            self.detector(store, policy=policy, issues=engine(store)).from_tree(tmp_path)
-        assert winner.read_text() == "mine"
-        assert loser.read_text() == "theirs"

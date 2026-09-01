@@ -415,6 +415,18 @@ class IssueEngine(QObject):
         target = source.with_name(new_name or suggest(source.name))
         if target == source:
             return False
+        if not source.exists():
+            log.warning("cannot rename %s: it is no longer there", source)
+            return False
+        # `Path.rename` is `rename(2)`: it replaces the destination silently and
+        # irreversibly. The fix for "this name is not allowed" must never be
+        # "and your other file is gone" — and the suggested name is deterministic,
+        # so two files hitting the same rule propose the *same* target, which is
+        # exactly when this collides.
+        if target.exists():
+            log.warning("cannot rename %s to %s: the target already exists",
+                        source, target.name)
+            return False
         source.rename(target)
         self.resolve(issue.id, f"renamed to {target.name}")
         return True

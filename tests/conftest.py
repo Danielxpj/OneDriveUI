@@ -156,7 +156,7 @@ def default_config(account_id: str = ACCOUNT.id, sync_root: str = "~/OneDrive") 
             "theme": "system", "accent_source": "onedrive", "animations": "system",
             "autostart": True, "autostart_method": "systemd", "start_minimized": True,
             "keep_tray_icon_when_stopped": True, "first_run_complete": False,
-            "active_account_id": None, "show_filebrowser": True, "locale": "system",
+            "active_account_id": None, "locale": "system",
         },
         "advanced": {
             "rclone_path": "/usr/bin/rclone", "rc_port_range": [17800, 17899],

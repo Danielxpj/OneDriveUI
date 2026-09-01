@@ -161,7 +161,14 @@ def _headless_engine(account_id: str | None) -> tuple[Any, Any]:
         except Exception:  # noqa: BLE001 - an unreachable drive is a finding,
             pass                                        # not a crash
 
-    engine.supervisor._on_collected(engine.supervisor.collector.tick())
+    # `collector.tick()`, NOT `supervisor._on_collected(...)`. Collecting facts
+    # is an observation; `_on_collected` is where the ladder's *effects* run, and
+    # those include restarting and force-unmounting the mount. Asking "what is
+    # the state?" must never be able to unmount a live filesystem — and a
+    # one-shot command always transitions out of INITIALIZING, so it fired the
+    # transition effects every single time. Every reader below reduces from
+    # `collector.last()`, which `tick()` fills on its own.
+    engine.supervisor.collector.tick()
     return app, engine
 
 
@@ -334,19 +341,67 @@ def _uninstall_extension() -> int:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _run_gui(args: argparse.Namespace, *, show_settings: bool = False) -> int:
+    """Run the client, or hand the request to the copy already running.
+
+    The single-instance guard was written, tested and never installed. Without
+    it every launcher click, every `odopen:` link and every "Settings" item in
+    the desktop entry's context menu started a **second complete client** —
+    another tray icon, another engine, another set of pollers, and two
+    processes writing the same SQLite file and driving the same mount. Two
+    mounts of one remote is the configuration that has already destroyed a file
+    on this machine, so this is a safety guard as much as a tidiness one.
+    """
+    from PySide6.QtWidgets import QApplication
+
     from onedriveui.app import Application
+    from onedriveui.platform.singleinstance import SingleInstance
+
+    # The QApplication first, because QLocalServer needs one — then the guard,
+    # and only then `Application`, which opens the database.
+    #
+    # The order matters: `Application.__init__` runs `db.integrity_check()`,
+    # which **renames a database it judges corrupt out of the way**, and starts
+    # the shared writer on it. Doing that before discovering we are not the
+    # primary instance would have a second launch touch the file the running
+    # client is writing. `Application` adopts this QApplication rather than
+    # building its own.
+    qt = QApplication.instance() or QApplication(sys.argv[:1])
+
+    guard = SingleInstance()
+    if not guard.try_acquire():
+        # Someone is already running. Hand them the request and leave: a second
+        # icon in the tray is not what the user asked for by clicking Settings.
+        guard.send(sys.argv)
+        return 0
 
     app = Application(sys.argv[:1])
     if args.log_level:
         from onedriveui import applog
 
         applog.set_level(args.log_level)
+
+    def _second_launch(argv: list) -> None:
+        """A second copy was started; show what it asked for."""
+        accounts = app.accounts()
+        if not accounts:
+            return
+        wanted = accounts[0].id
+        if "--settings" in argv:
+            app.open_settings(wanted)
+        else:
+            app.open_activity(wanted)
+
+    guard.message.connect(_second_launch)
+
     app.start()
     if show_settings:
         accounts = app.accounts()
         if accounts:
             app.open_settings(args.account or accounts[0].id)
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        guard.release()
 
 
 def _open_folder(account_id: str | None) -> int:
@@ -384,10 +439,19 @@ def _pause(account_id: str | None, hours: str) -> int:
         return 2
 
     client = IpcClient()
-    reply = client.request({"op": "do", "v": 1, "action": "pause",
-                            "hours": parsed, "paths": []})
-    if not reply or reply.get("op") != "ok":
+    # `send()` returns False when the socket was never opened, and `request()`
+    # reports that as "not running" — so without this line the launcher's
+    # "Pause syncing" always failed, whether or not the client was running.
+    if not client.connect():
         print("OneDriveUI is not running", file=sys.stderr)
+        return 1
+    try:
+        reply = client.request({"op": "do", "v": 1, "action": "pause",
+                                "hours": parsed, "paths": []})
+    finally:
+        client.close()
+    if not reply or reply.get("op") != "ok":
+        print("OneDriveUI did not accept the pause", file=sys.stderr)
         return 1
     return 0
 

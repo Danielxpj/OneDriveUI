@@ -34,6 +34,7 @@ from typing import Any, Final
 from PySide6.QtCore import QObject, Signal
 
 from onedriveui.bus import BUS
+from onedriveui.data import repo_files
 from onedriveui.models import (
     AccountInfo,
     Facts,
@@ -47,6 +48,11 @@ from onedriveui.models import (
 from onedriveui.strings import ACTION_LABEL, issue_title
 
 log = logging.getLogger(__name__)
+
+#: How long the same toast is suppressed for, across restarts. Five minutes is
+#: longer than any crash-restart loop the units allow (five starts in five
+#: minutes) and shorter than any interval a user would call "it never tells me".
+TOAST_MIN_INTERVAL_S: int = 300
 
 __all__ = ["NoticeCenter", "Notice", "TOAST_FOR_STATE", "SETTING_FOR_TOAST"]
 
@@ -197,6 +203,23 @@ class NoticeCenter(QObject):
             return False
         if self._notifier is None:
             return False
+
+        # Persistent rate limiting. `repo_files.should_show()` says why it lives
+        # in the database rather than in the notifier: "so it survives a restart
+        # — a crash loop must not produce a toast storm". It had no caller, so
+        # the only thing standing between the user and a toast per launch was
+        # this process's own memory, which a restart wipes. A client that
+        # restarts five times in a minute — which is exactly what the mount
+        # unit's `Restart=always` produces on a bad day — raised five identical
+        # toasts.
+        key = f"{self.account.id}:{nid.value}"
+        try:
+            if not repo_files.should_show(key,
+                                          min_interval_s=TOAST_MIN_INTERVAL_S):
+                log.debug("%s was shown too recently; not repeating it", nid.value)
+                return False
+        except Exception:  # noqa: BLE001 - a missing row must not silence a toast
+            log.debug("could not check the toast rate limit", exc_info=True)
         numbers = dict(fmt)
         if facts is not None:
             numbers.setdefault("n", facts.issues_error or facts.issues_blocking)
@@ -205,6 +228,10 @@ class NoticeCenter(QObject):
         except Exception:  # noqa: BLE001 - a missing notification daemon is not fatal
             log.warning("could not raise the %s toast", nid.value, exc_info=True)
             return False
+        try:
+            repo_files.note_notification(key, account_id=self.account.id)
+        except Exception:  # noqa: BLE001 - the toast was already shown
+            log.debug("could not record the toast", exc_info=True)
         self.toast_raised.emit(nid)
         return True
 
