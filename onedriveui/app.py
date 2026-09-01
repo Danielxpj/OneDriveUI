@@ -472,12 +472,26 @@ class Application:
     # ═════════════════════════════════════════════════════════════════════════
 
     def accounts(self) -> list[AccountInfo]:
-        """Every configured account."""
+        """Every configured account that is **enabled**.
+
+        `enabled` is not decoration: `start()` builds an engine, a tray icon and
+        a mount unit for everything this returns. An account switched off in
+        Settings that still came back from here would put a second icon in the
+        tray and a second FUSE mount on the disk — which is exactly what a
+        left-over entry did, with the mount pointed at a live remote somebody
+        else was already mounting.
+        """
         out: list[AccountInfo] = []
         for entry in getattr(self.config, "accounts", []) or []:
             to_info = getattr(entry, "to_account_info", None)
-            if callable(to_info):
-                out.append(to_info())
+            if not callable(to_info):
+                continue
+            info = to_info()
+            if not getattr(info, "enabled", True):
+                log.info("account %s is disabled; no engine, tray or mount",
+                         info.id)
+                continue
+            out.append(info)
         return out
 
     def engine_for(self, account: AccountInfo) -> Engine:
@@ -503,6 +517,9 @@ class Application:
         the bring-up goes before it so the first tick sees a daemon that is at
         least trying, rather than one nothing ever started.
         """
+        self._sync_autostart()
+        BUS.config_changed.connect(self._on_config_changed)
+
         for account in self.accounts():
             engine = self.engine_for(account)
             if not self.headless:
@@ -510,6 +527,48 @@ class Application:
             for problem in engine.bring_up():
                 log.warning("%s did not come up — %s", account.id, problem)
             engine.supervisor.start()
+
+    def _on_config_changed(self, key: str) -> None:
+        """Config keys whose effect lives outside the config file."""
+        if key in ("app.autostart", "app.autostart_method"):
+            self._sync_autostart()
+
+    def _sync_autostart(self) -> None:
+        """Make the disk agree with ``app.autostart``.
+
+        The *Start OneDrive when I sign in* switch writes its dotted key and
+        nothing else — every control on that Settings page goes through one
+        uniform ``_write``, which is what keeps "immediate apply" a property of
+        the page rather than something each toggle remembers. Turning that key
+        into a systemd unit or an XDG entry is the composition root's job, and
+        it belongs here for two reasons: the toggle has no business knowing what
+        a unit file is, and only a reconcile at start-up can fix a machine whose
+        config says ``true`` while the disk holds neither mechanism — the state
+        a restored backup, or a config written by a script, leaves behind.
+
+        Never raises. An autostart entry that could not be written is worth a
+        log line and nothing more; refusing to start the client over it would
+        trade a missing convenience for a missing client.
+        """
+        if self.headless:
+            # `--state` and friends answer a question and exit. Installing a
+            # login unit as a side effect of one is not what was asked for.
+            return
+        from onedriveui.platform import autostart
+
+        want = bool(self.config.get("app.autostart", False))
+        wanted_method = str(self.config.get("app.autostart_method",
+                                            autostart.METHOD_SYSTEMD))
+        try:
+            installed = autostart.method()
+            target = wanted_method if want else autostart.METHOD_NONE
+            if installed == target:
+                return
+            now = autostart.set_enabled(want, wanted_method)
+            log.info("autostart reconciled: %s -> %s", installed, now)
+        except Exception:  # noqa: BLE001 - never fail to start over autostart
+            log.warning("could not apply app.autostart=%s (%s)", want,
+                        wanted_method, exc_info=True)
 
     def _build_ui(self, account: AccountInfo, engine: Engine) -> None:
         from onedriveui.ui.notices import NoticeCenter

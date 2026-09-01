@@ -19,6 +19,7 @@ import json
 import pathlib
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -313,6 +314,147 @@ class TestBringUp:
                     if isinstance(child, ast.Attribute):
                         assert child.attr != "bring_up", \
                             f"{node.name} brings services up"
+
+
+class TestAccountFanOut:
+    """`accounts()` is the fan-out point: one engine, one tray icon and one
+    mount unit per entry it returns."""
+
+    @staticmethod
+    def _app(*entries):
+        """An `Application` with a config and nothing else — `accounts()` reads
+        only `self.config`, and building the real thing would want Qt, a theme
+        and a database writer to answer a question about a list."""
+        from onedriveui.app import Application
+
+        app = Application.__new__(Application)
+        app.config = SimpleNamespace(accounts=list(entries))
+        return app
+
+    @staticmethod
+    def _entry(account_id, *, enabled=True):
+        info = AccountInfo(id=account_id, remote=account_id, enabled=enabled)
+        return SimpleNamespace(to_account_info=lambda: info)
+
+    def test_a_disabled_account_gets_no_engine(self):
+        """A left-over `onedrive` entry with `enabled: false` used to come back
+        from here anyway, and `start()` then gave it a tray icon (a second,
+        identical cloud in the bar) and a mount unit — pointed at a live remote
+        the user was already mounting elsewhere. Two mounts of one account
+        cannot see each other's renames; that is how a real file was lost."""
+        app = self._app(self._entry("onedrive", enabled=False),
+                        self._entry("onedriveui_test"))
+        assert [a.id for a in app.accounts()] == ["onedriveui_test"]
+
+    def test_enabled_accounts_all_come_back(self):
+        """Two *enabled* accounts are two tray icons on purpose: that is how the
+        Windows client shows a personal and a work drive."""
+        app = self._app(self._entry("personal"), self._entry("work"))
+        assert [a.id for a in app.accounts()] == ["personal", "work"]
+
+    def test_an_entry_that_cannot_project_is_skipped(self):
+        app = self._app(SimpleNamespace(), self._entry("personal"))
+        assert [a.id for a in app.accounts()] == ["personal"]
+
+
+class TestAutostartReconcile:
+    """`app.autostart` is a config key; autostart is a file on disk. Something
+    has to turn one into the other."""
+
+    @staticmethod
+    def _app(*, headless=False, **settings):
+        from onedriveui.app import Application
+
+        app = Application.__new__(Application)
+        app.headless = headless
+        app.config = SimpleNamespace(
+            get=lambda key, default=None: settings.get(key, default))
+        return app
+
+    @staticmethod
+    def _spy(monkeypatch, installed):
+        """Replace the two `autostart` calls `_sync_autostart` makes."""
+        from onedriveui.platform import autostart
+
+        calls: list[tuple] = []
+        monkeypatch.setattr(autostart, "method", lambda: installed)
+        monkeypatch.setattr(
+            autostart, "set_enabled",
+            lambda enable, method=autostart.METHOD_SYSTEMD, **kw:
+                (calls.append((enable, method)), method if enable else "none")[1])
+        return calls
+
+    def test_the_toggle_reaches_the_disk(self, monkeypatch):
+        """The Settings switch writes `app.autostart` and emits
+        `config_changed`; every control on that page goes through the same
+        uniform `_write`. If nobody listens, the config claims autostart is on
+        and neither the unit nor the XDG entry exists — which is exactly what a
+        user reports as "autostart didn't work"."""
+        calls = self._spy(monkeypatch, "none")
+        app = self._app(**{"app.autostart": True,
+                           "app.autostart_method": "systemd"})
+        app._sync_autostart()
+        assert calls == [(True, "systemd")]
+
+    def test_turning_it_off_removes_what_is_installed(self, monkeypatch):
+        calls = self._spy(monkeypatch, "systemd")
+        app = self._app(**{"app.autostart": False})
+        app._sync_autostart()
+        assert calls == [(False, "systemd")]
+
+    def test_an_agreeing_disk_is_left_alone(self, monkeypatch):
+        """Rewriting a unit that is already correct would restart it at every
+        launch."""
+        calls = self._spy(monkeypatch, "systemd")
+        app = self._app(**{"app.autostart": True,
+                           "app.autostart_method": "systemd"})
+        app._sync_autostart()
+        assert calls == []
+
+    def test_a_method_change_migrates(self, monkeypatch):
+        calls = self._spy(monkeypatch, "systemd")
+        app = self._app(**{"app.autostart": True,
+                           "app.autostart_method": "xdg"})
+        app._sync_autostart()
+        assert calls == [(True, "xdg")]
+
+    def test_headless_installs_nothing(self, monkeypatch):
+        """`--state` asks a question. It does not opt the user into a login
+        unit as a side effect of answering one."""
+        calls = self._spy(monkeypatch, "none")
+        app = self._app(headless=True, **{"app.autostart": True})
+        app._sync_autostart()
+        assert calls == []
+
+    def test_a_failure_does_not_stop_the_client(self, monkeypatch):
+        """A missing autostart entry is a missing convenience. Refusing to
+        launch over it would trade that for a missing client."""
+        from onedriveui.platform import autostart
+
+        monkeypatch.setattr(autostart, "method", lambda: "none")
+
+        def boom(*a, **kw):
+            raise OSError("systemd is not running")
+
+        monkeypatch.setattr(autostart, "set_enabled", boom)
+        app = self._app(**{"app.autostart": True})
+        app._sync_autostart()          # must not raise
+
+    def test_start_reconciles_before_it_fans_out(self):
+        """On start-up too, not only on the toggle: a config restored from a
+        backup, or written by a script, says `true` over a disk that holds
+        neither mechanism, and only a reconcile at launch fixes it."""
+        source = (REPO_ROOT / "onedriveui" / "app.py").read_text(
+            encoding="utf-8")
+        tree = ast.parse(source)
+        # `Application.start`, not the local helper of the same name inside
+        # `build_engine`, which `ast.walk` reaches first.
+        start = next(n for n in ast.walk(tree)
+                     if isinstance(n, ast.FunctionDef) and n.name == "start"
+                     and [a.arg for a in n.args.args] == ["self"])
+        called = [c.func.attr for c in ast.walk(start)
+                  if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)]
+        assert "_sync_autostart" in called
 
 
 class TestActivityCenterWiring:
