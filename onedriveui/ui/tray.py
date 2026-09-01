@@ -17,10 +17,37 @@ not as a widget, not as nothing, as a blank row the user can click. So there is
 no progress bar in the menu, no account header widget, no separators with text.
 Everything the tray menu says, it says in a plain label.
 
-**Left-click opens the menu.** The AppIndicator extension maps both buttons to
-the menu; ``activated`` with ``Trigger`` never arrives. So "Open Activity
-Center" is the **first** item and the default one, because for most users the
-first item is what a left-click was going to do anyway.
+**The host owns the click, and GNOME splits the buttons like this:** single
+click opens the menu, **double** click opens the Activity Center, right click
+opens the menu. That is not our choice and there is no setting for it — the
+AppIndicator extension hard-codes it in ``indicatorStatusIcon.js``::
+
+    _maybeHandleDoubleClick(event)     # the 2nd click -> _indicator.open()
+        -> DBus Activate -> QSystemTrayIcon.Trigger
+    _waitForDoubleClick()              # the 1st click, after the timeout
+        -> this.menu.toggle()
+
+So the Windows and macOS gesture — a *single* click raises the client — is not
+available on this desktop, and wiring the UI as though it were would produce a
+control that does nothing.
+
+**``activated`` is connected anyway, and it matters.** Qt exports an
+``Activate`` method on the item, which is verifiable on a running client::
+
+    $ busctl --user introspect <unique-name> /StatusNotifierItem
+    .Activate           method  ii
+    .SecondaryActivate  method  ii
+    .ContextMenu        method  ii
+
+The extension calls it on a double click and Qt delivers it as ``Trigger``.
+With nothing connected — which is how this shipped — that reached Qt and died
+there, so a double click on the icon did nothing whatsoever. Handling it is
+what makes the gesture work at all.
+
+**"Open Activity Center" is still the first menu item.** It is the single-click
+route on this desktop, and the only route on a host that never sends
+``Activate``. A tray icon that appears dead when clicked is the worst possible
+failure, so the affordance stays in the menu regardless.
 
 **The menu must be rebuilt, not mutated.** Changing an action's visibility after
 the menu has been exported reflows the DBusMenu incorrectly — the observed
@@ -134,9 +161,11 @@ class TrayItem(QObject):
         self._item = QSystemTrayIcon(self)
         self._menu = QMenu()
         self._item.setContextMenu(self._menu)
-        # Never connect `activated`: the AppIndicator extension maps both mouse
-        # buttons to the menu and this signal does not arrive. Relying on it
-        # produces a tray icon that appears to do nothing when clicked.
+        # `Activate` from the host. On GNOME that is a *double* click, not a
+        # single one — see the module docstring. Connected because otherwise it
+        # arrives and dies here, which is how a double click on the icon came
+        # to do nothing at all.
+        self._item.activated.connect(self._on_activated)
         self._item.setToolTip(self.account.display_name or self.account.id)
 
         self._spinner = QTimer(self)
@@ -309,6 +338,22 @@ class TrayItem(QObject):
     # ═════════════════════════════════════════════════════════════════════════
     # Actions — every one through `do()` or the bus
     # ═════════════════════════════════════════════════════════════════════════
+
+    def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        """The host asked us to show ourselves.
+
+        `Trigger` is what Qt reports for a DBus `Activate`, which on GNOME is a
+        double click; `DoubleClick` is what hosts that distinguish the two send
+        instead. Both mean "show me the client", so both open the Activity
+        Center rather than one of them doing nothing.
+
+        `Context` is never handled here: the host owns the right-click and
+        opens the menu we exported, so acting on it as well would open the
+        flyout *and* the menu on the same press.
+        """
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger,
+                      QSystemTrayIcon.ActivationReason.DoubleClick):
+            self._open_activity()
 
     def _open_activity(self) -> None:
         self.activity_requested.emit(self.account.id)

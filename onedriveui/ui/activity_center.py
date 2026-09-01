@@ -296,11 +296,13 @@ _FLYOUT_STROKE = 1
 
 _GLYPH_SETTINGS = "settings"
 _GLYPH_HELP = "help"
+_GLYPH_CLOSE = "close"
 _ROLE_STRONG = "body_strong"
 _ROLE_BODY = "body"
 _ROLE_CAPTION = "caption"
 
-for _key in (_GLYPH_SETTINGS, _GLYPH_HELP, *(row[0] for row in FOOTER_COMMANDS)):
+for _key in (_GLYPH_SETTINGS, _GLYPH_HELP, _GLYPH_CLOSE,
+             *(row[0] for row in FOOTER_COMMANDS)):
     icons.glyph_stem(_key)                  # raises KeyError on an unknown key
 del _key
 for _role in (_ROLE_STRONG, _ROLE_BODY, _ROLE_CAPTION):
@@ -478,7 +480,8 @@ class ActivityCenter(QWidget):
 
     # ── construction ─────────────────────────────────────────────────────
     def _build_header(self) -> QWidget:
-        """Avatar, account name, email, and the gear at a 16 px right inset."""
+        """Avatar, account name, email, then the gear and the close button at a
+        16 px right inset."""
         header = QFrame(self._surface)
         header.setObjectName(OBJ.ACTIVITY_HEADER)
         header.setFixedHeight(self.HEADER_H)
@@ -504,6 +507,19 @@ class ActivityCenter(QWidget):
         self._gear.setAccessibleName(MENU.SETTINGS)
         self._gear.clicked.connect(self.settings_requested.emit)
         row.addWidget(self._gear, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        # A visible way out. The flyout is a frameless `Qt.Tool` window: it has
+        # no titlebar and therefore no close control of its own, and while Esc
+        # dismisses it, a keyboard shortcut is not an affordance — nothing on
+        # screen says it exists. On this desktop the icon's single click opens
+        # the *menu* rather than toggling the flyout, so the icon is not a way
+        # back out either. Without this the window can be left with no obvious
+        # way to dismiss it.
+        self._close = icon_button(_GLYPH_CLOSE, header, size=self.GLYPH,
+                                  tooltip=DIALOG.CLOSE)
+        self._close.setAccessibleName(DIALOG.CLOSE)
+        self._close.clicked.connect(self.close)
+        row.addWidget(self._close, 0, Qt.AlignmentFlag.AlignVCenter)
         return header
 
     def _build_status(self) -> QWidget:
