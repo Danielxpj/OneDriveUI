@@ -27,12 +27,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "onedriveui"
 version = "0.1.0"
-description = "A OneDrive client for Linux, built on rclone"
+description = "A OneDrive client for Linux with a real GUI: tray icon, Files On-Demand and Nautilus integration, built on rclone"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Daniel Dughman" }]
-keywords = ["onedrive", "rclone", "sync", "cloud", "gnome", "nautilus"]
+keywords = [
+    "onedrive", "onedrive-client", "onedrive-sync", "microsoft-365",
+    "rclone", "sync", "cloud-storage", "files-on-demand",
+    "linux", "gnome", "nautilus", "qt", "pyside6", "desktop",
+]
 
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -63,6 +67,9 @@ onedriveui = "onedriveui.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/Danielxpj/OneDriveUI"
+Documentation = "https://github.com/Danielxpj/OneDriveUI#readme"
+Issues = "https://github.com/Danielxpj/OneDriveUI/issues"
+Source = "https://github.com/Danielxpj/OneDriveUI"
 
 [tool.setuptools.packages.find]
 include = ["onedriveui*"]
