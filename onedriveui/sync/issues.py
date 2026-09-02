@@ -453,6 +453,19 @@ class IssueEngine(QObject):
         kw.setdefault("rel_path", getattr(issue, "rel_path", "") or None)
         return self._via_supervisor(RecoveryAction.FREE_UP_SPACE, issue, **kw)
 
+    # PIN and UNPIN are the other half of FREE_UP_SPACE and take the same
+    # `rel_path` from the issue. They were added to `RecoveryAction` and to
+    # `Supervisor._ACTIONS` in f58e05a but not here, so `execute()` raised the
+    # KeyError its own docstring calls "loud on purpose" for any issue that
+    # offered them.
+    def _fix_pin(self, issue, **kw):
+        kw.setdefault("rel_path", getattr(issue, "rel_path", "") or None)
+        return self._via_supervisor(RecoveryAction.PIN, issue, **kw)
+
+    def _fix_unpin(self, issue, **kw):
+        kw.setdefault("rel_path", getattr(issue, "rel_path", "") or None)
+        return self._via_supervisor(RecoveryAction.UNPIN, issue, **kw)
+
     def _fix_get_more_storage(self, issue, **kw):
         return self._via_supervisor(RecoveryAction.GET_MORE_STORAGE, issue, **kw)
 
@@ -533,6 +546,8 @@ class IssueEngine(QObject):
         RecoveryAction.KEEP_CLOUD: "_fix_keep_cloud",
         RecoveryAction.SIGN_IN: "_fix_sign_in",
         RecoveryAction.FREE_UP_SPACE: "_fix_free_up_space",
+        RecoveryAction.PIN: "_fix_pin",
+        RecoveryAction.UNPIN: "_fix_unpin",
         RecoveryAction.GET_MORE_STORAGE: "_fix_get_more_storage",
         RecoveryAction.RESYNC: "_fix_resync",
         RecoveryAction.FORCE_DELETE: "_fix_force_delete",

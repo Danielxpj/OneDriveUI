@@ -32,6 +32,7 @@ are applied in that order even from different threads.
 
 from __future__ import annotations
 
+import atexit
 import queue
 import sqlite3
 import threading
@@ -456,3 +457,26 @@ class DbWriter(QThread):
 #: ``integrity_check()`` has had a chance to move a corrupt one aside. ``app.py``
 #: calls ``WRITER.start_writer()`` once, after the integrity check.
 WRITER: Final[DbWriter] = DbWriter()
+
+
+@atexit.register
+def _stop_writer_at_exit() -> None:
+    """Join the writer thread before the interpreter tears the process down.
+
+    ``Application.quit()`` already stops it, and that is where the lifecycle
+    belongs — but ``submit()`` starts the writer on demand, so *any* caller can
+    bring the thread up in a process that never built an ``Application``. The
+    Nautilus extension, a one-off script and the test suite are all such
+    processes, and none of them has a shutdown step to hook.
+
+    Left running, the thread outlives the interpreter's own teardown: PySide
+    destroys the ``QApplication``, Qt finds a live ``QThread`` under it and
+    calls ``qFatal()``, and the process dies with SIGABRT and a core dump after
+    its work is already done. Stopping here is idempotent and costs nothing when
+    the writer was never started.
+    """
+    try:
+        if WRITER.isRunning():
+            WRITER.stop()
+    except Exception:  # noqa: BLE001 - the interpreter is going away regardless
+        pass

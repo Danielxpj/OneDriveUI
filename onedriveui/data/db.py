@@ -56,7 +56,7 @@ __all__ = [
 
 #: The version ``migrations/`` brings a fresh database to. Bumped by adding a
 #: new ``00N_*.sql``, never by editing a shipped one.
-SCHEMA_VERSION: Final[int] = 2
+SCHEMA_VERSION: Final[int] = 3
 
 SCHEMA_DIR: Final[Path] = Path(__file__).resolve().parent
 MIGRATIONS_DIR: Final[Path] = SCHEMA_DIR / "migrations"

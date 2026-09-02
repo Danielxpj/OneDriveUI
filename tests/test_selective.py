@@ -84,6 +84,32 @@ def tree_hash(root: Path) -> str:
 
 class TestApply:
 
+    def test_a_real_change_restarts_the_mount(self, qapp, account, store):
+        """Unticking a folder has to reach rclone, and only a restart does that.
+
+        The rules are command-line arguments, so a running mount cannot be told
+        about a new one. Before this was wired, `apply()` persisted the
+        selection, evicted the cache and returned — and the mount carried on
+        serving every folder the user had just unticked.
+        """
+        calls = []
+        selective = SelectiveSync(account, writer=store,
+                                  remount=lambda: calls.append("remount") or True)
+        selective.apply(["Photos"], prune=False)
+        assert calls == ["remount"]
+
+    def test_a_remount_failure_does_not_lose_the_selection(self, qapp, account,
+                                                           store):
+        """The selection is already persisted and correct; the mount picks it up
+        on its next start either way. A restart that fails must not raise into a
+        dialog the user has already confirmed."""
+        def boom():
+            raise RuntimeError("systemd said no")
+
+        selective = SelectiveSync(account, writer=store, remount=boom)
+        selective.apply(["Photos"], prune=False)
+        assert selective.excluded() == ["Photos"]
+
     def test_a_failed_resync_prunes_nothing(self, qapp, account, store):
         """The whole reason for the ordering. Pruning first means a failed
         resync has already destroyed local copies of files that are still

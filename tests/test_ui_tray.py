@@ -295,19 +295,61 @@ class TestTrayActions:
         assert supervisor.actions[0][0] is RecoveryAction.SHOW_IN_FOLDER
 
     def test_no_ui_file_calls_a_service_directly(self):
-        """Every action reaches `Supervisor.do()` or a `BUS` signal."""
+        """Every action reaches `Supervisor.do()` or a `BUS` signal.
+
+        This used to inspect only `node.module`, so it saw
+        `from onedriveui.data.repo_files import x` and missed
+        `from onedriveui.data import repo_files` — the form `notices.py`
+        actually uses. The rule was unenforced for its whole life. Both forms
+        are checked now, and so is a plain `import onedriveui.data.repo_files`.
+
+        `notices.py` is allowed exactly one of the banned modules, for exactly
+        two functions: the toast rate limit is persisted so a crash loop cannot
+        produce a toast storm, and that is UI state, not an action reaching a
+        service. Naming the exemption keeps it a decision rather than a hole —
+        every other `repo_files` call from `notices.py` still fails here.
+        """
         banned = ("rc.vfs", "rc.ops", "rc.bisync", "data.repo_sync",
                   "data.repo_files")
+        allowed_calls = {"notices.py": {"should_show", "note_notification"}}
+
+        def hits(module: str) -> bool:
+            return any(module == b or module.endswith("." + b) for b in banned)
+
         offenders = []
         for name in ("tray.py", "notices.py"):
             text = (REPO_ROOT / "onedriveui" / "ui" / name).read_text(
                 encoding="utf-8")
             tree = ast.parse(text)
+            exempt = allowed_calls.get(name, set())
+            bound = set()
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom) and node.module:
-                    for prefix in banned:
-                        if node.module.endswith(prefix):
-                            offenders.append(f"{name}:{node.lineno} {node.module}")
+                    if hits(node.module):
+                        offenders.append(f"{name}:{node.lineno} {node.module}")
+                    for alias in node.names:
+                        if hits(f"{node.module}.{alias.name}"):
+                            if alias.name == "repo_files" and exempt:
+                                bound.add(alias.asname or alias.name)
+                            else:
+                                offenders.append(
+                                    f"{name}:{node.lineno} "
+                                    f"{node.module}.{alias.name}")
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if hits(alias.name):
+                            offenders.append(
+                                f"{name}:{node.lineno} {alias.name}")
+            # The exemption is per-function, not per-module: an import allowed
+            # for the rate limit must not become a door to the rest of the
+            # repository.
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Attribute)
+                        and isinstance(node.value, ast.Name)
+                        and node.value.id in bound
+                        and node.attr not in exempt):
+                    offenders.append(
+                        f"{name}:{node.lineno} repo_files.{node.attr}")
         assert offenders == []
 
     def test_a_missing_supervisor_is_a_no_op(self, qapp):

@@ -83,11 +83,13 @@ CREATE UNIQUE INDEX ux_activity_dedupe ON activity(dedupe_key) WHERE dedupe_key 
 -- into this table continuously. The exact per-account trim is
 -- `db.vacuum_and_prune()`, run hourly.
 CREATE TRIGGER trg_activity_cap AFTER INSERT ON activity
-WHEN NEW.id % 500 = 0
+WHEN abs(random()) % 500 = 0
 BEGIN
   DELETE FROM activity
    WHERE account_id = NEW.account_id
-     AND id <= NEW.id - 5000;
+     AND id NOT IN (SELECT id FROM activity
+                     WHERE account_id = NEW.account_id
+                     ORDER BY id DESC LIMIT 5000);
 END;
 
 -- ─── writer: sync/issues.py ───────────────────────────────────────────────────

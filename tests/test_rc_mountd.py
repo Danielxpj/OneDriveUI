@@ -179,6 +179,39 @@ class TestBuildArgv:
             "--use-json-log", "--color", "NEVER", "--log-level", "INFO",
         ]
 
+    def test_the_users_unticked_folders_reach_the_argv(self, systemd, account):
+        """"Choose folders" is only real if its rules are on the command line.
+
+        They were not. `SelectiveSync.as_mount_excludes()` had no caller
+        anywhere in the product and `build_argv()` took no rules, so unticking a
+        folder evicted its cache and recorded the exclusion while the mount went
+        on serving it. Nothing failed, which is why nobody noticed.
+
+        `--filter`, not `--exclude`: the rules carry the leading `- ` that
+        rclone reads only under `--filter`.
+        """
+        ctl = MountController(
+            systemd,
+            excludes=lambda _a: ["- /Photos/", "- /Work/Archive/"])
+        argv = ctl.build_argv(account, PORT, CREDS)
+        pairs = [(argv[i], argv[i + 1]) for i in range(len(argv) - 1)]
+        assert ("--filter", "- /Photos/") in pairs
+        assert ("--filter", "- /Work/Archive/") in pairs
+        # The mandatory excludes are still there and still `--exclude`.
+        assert ("--exclude", "/.onedriveui-trash/**") in pairs
+        # And a controller with no selection adds no filters at all.
+        assert "--filter" not in MountController(systemd).build_argv(
+            account, PORT, CREDS)
+
+    def test_the_selection_provider_can_be_attached_after_construction(
+            self, systemd, account):
+        """`build_engine()` builds the controller before the selection service,
+        so the provider arrives late. It must still reach the argv."""
+        ctl = MountController(systemd)
+        assert "--filter" not in ctl.build_argv(account, PORT, CREDS)
+        ctl.set_excludes_provider(lambda _a: ["- /Photos/"])
+        assert ("--filter" in ctl.build_argv(account, PORT, CREDS))
+
     def test_it_passes_its_own_backend_flag_guard(self, argv):
         """Acceptance: assert_no_backend_flags(build_argv(...)) passes."""
         guards.assert_no_backend_flags(argv)

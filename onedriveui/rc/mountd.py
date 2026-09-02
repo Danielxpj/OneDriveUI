@@ -28,7 +28,7 @@ import logging
 import os
 import subprocess
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -293,6 +293,7 @@ class MountController(QObject):
 
     def __init__(self, systemd: SystemdLike, *,
                  options: Callable[[AccountInfo], Mapping[str, Any]] | None = None,
+                 excludes: Callable[[AccountInfo], Sequence[str]] | None = None,
                  rclone_path: str = RCLONE_DEFAULT,
                  user_agent: str = USER_AGENT,
                  schedule: Callable[[int, Callable[[], None]], None] | None = None,
@@ -303,6 +304,11 @@ class MountController(QObject):
             options: Returns the ``accounts[].mount`` block for an account.
                 Defaults to :data:`DEFAULT_MOUNT_OPTIONS`. Injected rather than
                 imported so WP-02 does not depend on WP-01's ``config.py``.
+            excludes: Returns the user's selective-sync filter rules for an
+                account, as produced by ``SelectiveSync.as_mount_excludes()``.
+                Injected for the same reason as `options`: WP-02 must not import
+                WP-08. Defaults to none, which is the correct answer for the
+                setup wizard's throwaway controller.
             rclone_path: ``advanced.rclone_path``.
             user_agent: ``advanced.user_agent``. The ``ISV|Company|App/Version``
                 shape is load-bearing for Microsoft's throttle prioritisation.
@@ -314,12 +320,25 @@ class MountController(QObject):
         super().__init__(parent)
         self._systemd = systemd
         self._options = options or (lambda _account: DEFAULT_MOUNT_OPTIONS)
+        self._excludes: Callable[[AccountInfo], Sequence[str]] = (
+            excludes or (lambda _account: ()))
         self._rclone_path = rclone_path
         self._user_agent = user_agent
         self._schedule = schedule or (lambda ms, fn: QTimer.singleShot(ms, fn))
         self._endpoints: dict[str, RcEndpoint] = {}
         self._health: dict[str, MountHealth] = {}
         self._restarts: dict[str, list[float]] = {}
+
+    def set_excludes_provider(
+            self, provider: Callable[[AccountInfo], Sequence[str]]) -> None:
+        """Point this controller at the account's selective-sync rules.
+
+        `build_engine()` has to construct the mount controller before the
+        selection service, because the selection service's evictor is built from
+        the pinner, which needs the mount's endpoint. So the provider is
+        attached afterwards rather than passed in.
+        """
+        self._excludes = provider
 
     # ── naming ──────────────────────────────────────────────────────────────
 
@@ -358,7 +377,8 @@ class MountController(QObject):
     # ── argv ────────────────────────────────────────────────────────────────
 
     def build_argv(self, account: AccountInfo, port: int,
-                   creds: tuple[str, str]) -> list[str]:
+                   creds: tuple[str, str],
+                   excludes: Sequence[str] | None = None) -> list[str]:
         """The mount command line of ARCHITECTURE §5.3.
 
         Every omission is as deliberate as every inclusion:
@@ -434,6 +454,24 @@ class MountController(QObject):
         ]
         for directory in MOUNT_EXCLUDE_DIRS:
             argv += ["--exclude", f"/{directory}/**"]
+        # The user's own unticked folders, from "Choose folders".
+        #
+        # Without this the setting did nothing at all: `as_mount_excludes()` had
+        # no caller anywhere in the product, so unticking a folder evicted it
+        # from the cache and marked it excluded in the database while the mount
+        # went on showing it, polling it and re-downloading it the moment
+        # anything walked the tree.
+        #
+        # `--filter`, not `--exclude`: `filters.exclude_rule()` returns a
+        # filter-file rule (`- /Photos/`), and rclone reads the leading `- ` only
+        # in `--filter`. Passing that string to `--exclude` would look right and
+        # match a file literally named `- /Photos/`, which is to say nothing at
+        # all. rclone appends `--include`, `--exclude` and `--filter` to one rule
+        # list in command-line order; every rule here excludes, so the order
+        # among them carries no meaning.
+        rules = excludes if excludes is not None else self._excludes(account)
+        for rule in rules:
+            argv += ["--filter", str(rule)]
         argv += [
             "--rc",
             "--rc-addr", f"127.0.0.1:{int(port)}",

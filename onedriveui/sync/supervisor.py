@@ -58,6 +58,7 @@ from onedriveui.data import db, repo_sync
 from onedriveui.errors import SafetyRefusal
 from onedriveui.models import (
     AccountInfo,
+    DecisionKind,
     Facts,
     IssueCode,
     IssueSeverity,
@@ -70,6 +71,7 @@ from onedriveui.models import (
     SyncState,
     utcnow_iso,
 )
+from onedriveui.sync.decisions import ANSWER_YES
 from onedriveui.sync.facts import FactCollector
 from onedriveui.sync.reducer import (
     EFFECT,
@@ -807,7 +809,18 @@ class Supervisor(QObject):
         # `AuthFlow.start(remote, ...)` requires the remote to re-authorise —
         # calling it bare raised TypeError, so even a wired flow could not have
         # signed anyone in.
-        self._auth.start(self.account.remote)
+        #
+        # `update=True` because SIGN_IN is always a *re*-authentication: it is
+        # the recovery action for AUTH_EXPIRED and AUTH_MFA, on an account whose
+        # remote is already in `rclone.conf`. The flag picks `config/update`
+        # over `config/create`, and on rclone v1.75.0 that difference is
+        # destructive: `create` deletes the whole section before rewriting it,
+        # so every key this app wrote under invariant I1 — the backend options
+        # from the rclone page, chunk size, region, client_id, drive_id and
+        # drive_type — is silently lost at the exact moment the user is already
+        # troubleshooting. `update` edits in place and keeps them. The wizard's
+        # own call stays on `create`: its remote genuinely is new.
+        self._auth.start(self.account.remote, update=True)
 
     def _do_pin(self, *, rel_path: str | None = None,
                 recursive: bool = False, **kw: Any) -> None:
@@ -991,6 +1004,24 @@ class Supervisor(QObject):
         if row is None:
             raise SafetyRefusal(
                 "I15", f"no decision {decision_id} to authorise a resync")
+        # Existence is not authorisation. The docstring above promises a refusal
+        # for a decision that is the wrong kind, unanswered, or answered with
+        # anything but yes — and the comment below promises the row is "still
+        # validated" — but the only check here was `row is None`, so a decision
+        # the user had explicitly *declined* authorised the resync just as well
+        # as one they approved. `ANSWER_EXPIRED` is refused by the same
+        # comparison, which is the seven-day rule: nobody was there to say yes.
+        if str(row.get("kind") or "") != DecisionKind.RESYNC_CONFIRM.value:
+            raise SafetyRefusal(
+                "I15", f"decision {decision_id} is a "
+                f"{row.get('kind')!r}, not a resync confirmation")
+        if not row.get("answered_at"):
+            raise SafetyRefusal(
+                "I15", f"decision {decision_id} has not been answered")
+        if str(row.get("answer") or "") != ANSWER_YES:
+            raise SafetyRefusal(
+                "I15", f"decision {decision_id} was answered "
+                f"{row.get('answer')!r}, which is not an approval")
         log.warning(
             "a resync was requested for %s by decision %s, but this client has "
             "no two-way sync engine to run one", self.account.id, decision_id)

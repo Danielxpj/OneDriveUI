@@ -389,6 +389,13 @@ ACTION_LABEL: dict[RecoveryAction, str] = {
     RecoveryAction.KEEP_LOCAL:          "Keep the version on this PC",
     RecoveryAction.KEEP_CLOUD:          "Keep the version in OneDrive",
     RecoveryAction.SIGN_IN:             "Sign in",
+    # PIN and UNPIN joined `RecoveryAction` in f58e05a without reaching this
+    # table, so `action_label()` raised KeyError for both. "Always keep on this
+    # device" is verbatim from Windows and matches the Nautilus submenu
+    # (`ext/nautilus_onedriveui.py`) word for word, which is the point: the same
+    # action must not be named two different things in two menus.
+    RecoveryAction.PIN:                 "Always keep on this device",
+    RecoveryAction.UNPIN:               "Don't keep on this device",
     RecoveryAction.FREE_UP_SPACE:       "Free up space",
     RecoveryAction.GET_MORE_STORAGE:    "Get more storage",
     RecoveryAction.RESYNC:              "Reset sync",

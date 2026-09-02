@@ -704,7 +704,18 @@ def build_engine(account: AccountInfo, *, cfg: Any = None,
     # and returned — "Choose folders" discarded the user's selection and
     # "Unlink this PC" showed its confirmation and unlinked nothing.
     selective = SelectiveSync(account, writer=writer,
-                              evict=lambda rel: pinner.free_up_space(rel))
+                              evict=lambda rel: pinner.free_up_space(rel),
+                              remount=lambda: mountd.rewrite_unit(account))
+    # Both halves of "Choose folders", which reached rclone through neither
+    # until now. `as_mount_excludes()` had no caller in the product at all, and
+    # `build_argv()` took no rules, so unticking a folder evicted its cache and
+    # recorded the exclusion while the mount carried on serving it — and
+    # anything that walked the tree downloaded it straight back.
+    #
+    # The provider is attached here rather than passed to the constructor
+    # because the controller is built above, before the pinner the selection
+    # service's evictor needs.
+    mountd.set_excludes_provider(lambda _acc: selective.as_mount_excludes())
     accounts_mgr = AccountManager(endpoint=rc_endpoint, writer=writer,
                                   stop_mount=mountd.unmount)
     browser = RemoteBrowser(account, endpoint=rc_endpoint)

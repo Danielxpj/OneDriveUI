@@ -29,12 +29,27 @@ log = logging.getLogger(__name__)
 
 __all__ = ["NotificationsPage", "TOGGLES"]
 
-#: ``(label, dotted config key)``, in the order Windows lists them. The five
-#: Microsoft ships first, then the three this client adds.
+#: ``(label, dotted config key)``, in the order Windows lists them. Microsoft's
+#: five first, then ours.
+#:
+#: `notifications.memories` is fourth because that is where Windows puts it. It
+#: was dropped from this tuple by accident in f58e05a — a single deleted line in
+#: a commit whose every intentional removal is named in its message, and this
+#: was not among them. Everything downstream kept expecting it: the config field
+#: (`NotificationsSection.memories`), the frozen string `SETTINGS.N_MEMORIES`,
+#: `SETTING_FOR_TOAST` and the toast policy in `platform/notify.py`. The row's
+#: absence left the key unreachable while it still defaults to False, so a
+#: memories producer wired later would have been off for ever with no control to
+#: turn it on.
+#:
+#: `notifications.sync_complete` is the one config field with no row here. That
+#: is not this list being wrong — there is no `SETTINGS.N_SYNC_COMPLETE` to
+#: label it with, and no visible string may be born outside `strings.py`.
 TOGGLES: Final[tuple[tuple[str, str], ...]] = (
     (SETTINGS.N_PAUSED, "notifications.paused"),
     (SETTINGS.N_SHARED, "notifications.shared_or_edited"),
     (SETTINGS.N_MASS_DELETE, "notifications.mass_delete"),
+    (SETTINGS.N_MEMORIES, "notifications.memories"),
     (SETTINGS.N_OTHER_ACCOUNTS, "notifications.other_accounts"),
     (SETTINGS.N_SYNC_ISSUES, "notifications.sync_issues"),
     (SETTINGS.N_CONFLICTS, "notifications.conflicts"),

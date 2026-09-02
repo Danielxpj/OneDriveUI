@@ -81,6 +81,18 @@ def _isolate_home(tmp_path_factory, monkeypatch) -> Iterator[Path]:
     monkeypatch.delenv("RCLONE_CONFIG", raising=False)
     monkeypatch.delenv("RCLONE_CACHE_DIR", raising=False)
     yield home
+    # Isolating HOME is only half of it. `DbWriter.submit()` starts the
+    # process-wide `WRITER` on demand, so any test that writes through the
+    # fall-back singleton — `notices.py` does, for its notification rate limit —
+    # leaves a thread running with an open connection to *this* test's database.
+    # The next test gets a fresh HOME but the same live writer still pointed at
+    # the old one, and its writes land in a temp tree that is already gone.
+    # Stopping here keeps each test's database to itself and keeps the thread
+    # from outliving the interpreter, which Qt answers with SIGABRT.
+    from onedriveui.data.writer import WRITER
+
+    if WRITER.isRunning():
+        WRITER.stop()
 
 
 @pytest.fixture(autouse=True)

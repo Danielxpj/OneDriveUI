@@ -310,6 +310,8 @@ class RecoveryAction(StrEnum):
     KEEP_LOCAL           = "keep_local"
     KEEP_CLOUD           = "keep_cloud"
     SIGN_IN              = "sign_in"
+    PIN                  = "pin"
+    UNPIN                = "unpin"
     FREE_UP_SPACE        = "free_up_space"
     GET_MORE_STORAGE     = "get_more_storage"
     RESYNC               = "resync"

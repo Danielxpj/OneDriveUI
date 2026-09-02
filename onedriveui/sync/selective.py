@@ -90,6 +90,7 @@ class SelectiveSync(QObject):
         writer: Any = None,
         resync: Any = None,
         evict: Any = None,
+        remount: Any = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -99,6 +100,11 @@ class SelectiveSync(QObject):
         #: ``(rel_path) -> bytes freed``, evicting a folder from the VFS cache.
         #: Injected: this module must not depend on the rc layer.
         self._evict = evict
+        #: ``() -> bool``, re-rendering the mount unit and restarting it, so a
+        #: new selection actually reaches rclone. Injected for the same reason
+        #: as `evict`. Without it `apply()` changes the database and the cache
+        #: and leaves the running mount showing every folder just unticked.
+        self._remount = remount
 
     # ═════════════════════════════════════════════════════════════════════════
     # Reads
@@ -157,9 +163,10 @@ class SelectiveSync(QObject):
                 prune is below the rewrite and not above it, **nothing local has
                 been touched**.
 
-        The exclusions take effect on the mount's next start, which is why the
-        rclone page offers the restart: `--exclude` is a command-line argument,
-        and a running mount cannot be told about a new one.
+        The exclusions are command-line arguments, so a running mount cannot be
+        told about a new one: `apply()` re-renders the unit and restarts it
+        through the injected `remount`. Until that was wired the selection
+        reached nothing at all — the rules had no reader anywhere in the product.
         """
         result = PruneResult()
         with filters.rewrite(self.account.id, excluded) as txn:
@@ -172,8 +179,8 @@ class SelectiveSync(QObject):
             # --resync" — is a *bisync* rule: rclone stores an MD5 of the
             # filters file beside its listings and aborts every later run when
             # it changes. This client has no bisync any more. The filters file
-            # now feeds one thing, the mount's `--exclude` rules, and the mount
-            # reads those when it next starts.
+            # now feeds one thing, the mount's `--filter` rules, and the
+            # mount is restarted below so that it reads them.
             #
             # Leaving the gate in place would have made every real selection
             # change fail: `_run_resync()` finds no runner, returns UNKNOWN, and
@@ -183,9 +190,29 @@ class SelectiveSync(QObject):
 
         self._persist(excluded)
         self.applied.emit(list(excluded))
+        self._apply_to_mount()
         if prune:
             result = self.prune_local(excluded)
         return result
+
+    def _apply_to_mount(self) -> bool:
+        """Re-render the unit and restart the mount, so the change is real.
+
+        A failure here must not undo the selection: it is already persisted and
+        correct, and the mount picks it up on its next start either way. So this
+        logs and reports rather than raising into a dialog the user has already
+        confirmed.
+        """
+        if self._remount is None:
+            log.warning("no remount wired; the folder selection will not reach "
+                        "the mount until it is next restarted")
+            return False
+        try:
+            return bool(self._remount())
+        except Exception:  # noqa: BLE001 - the selection is saved regardless
+            log.error("could not restart the mount for the new selection",
+                      exc_info=True)
+            return False
 
     def _run_resync(self) -> RunVerdict:
         if self._resync is None:
@@ -300,7 +327,12 @@ class SelectiveSync(QObject):
     # ═════════════════════════════════════════════════════════════════════════
 
     def as_mount_excludes(self, excluded: list[str] | None = None) -> list[str]:
-        """The same selection, as ``--exclude`` arguments for the mount.
+        """The same selection, as ``--filter`` arguments for the mount.
+
+        Each rule carries the leading ``- `` that :func:`filters.exclude_rule`
+        renders, and rclone reads that prefix only under ``--filter``. Handing
+        these to ``--exclude`` would match a file literally named ``- /Photos/``
+        and so exclude nothing at all.
 
         Args:
             excluded: The folders, or ``None`` to read them from the database.

@@ -538,18 +538,28 @@ class TestRequestResync:
         with pytest.raises(SafetyRefusal):
             supervisor(store).request_resync(decision_id=decision_id)
 
-    def test_runs_an_approved_one(self, qapp, store):
-        class Runner:
-            def __init__(self):
-                self.ran = []
+    def test_an_approved_one_is_accepted(self, qapp, store):
+        """The gate opens for a real approval — and only for one.
 
-            def resync(self, account):
-                self.ran.append(account.id)
-
-        runner = Runner()
+        This used to assert that an injected bisync runner ran. There is no
+        bisync engine any more (f58e05a deleted the whole Topology-B stack), so
+        `request_resync` validates the decision and logs that it has nothing to
+        run. The surviving property is the one worth pinning: an approved
+        decision must pass the I15 gate that `no`, `expired` and unanswered are
+        all refused by. Asserting the absence of the refusal keeps the three
+        negative cases honest — without this, deleting the whole gate would
+        still leave them green.
+        """
         decision_id = self._decision(store, answer="yes")
-        supervisor(store, bisync=runner).request_resync(decision_id=decision_id)
-        assert runner.ran == [ACCOUNT.id]
+        supervisor(store).request_resync(decision_id=decision_id)
+
+    def test_refuses_the_wrong_kind_of_decision(self, qapp, store):
+        """An approval for a mass delete is not an approval for a resync."""
+        decision_id = self._decision(store, answer="yes",
+                                     kind=DecisionKind.MASS_DELETE)
+        with pytest.raises(SafetyRefusal) as excinfo:
+            supervisor(store).request_resync(decision_id=decision_id)
+        assert excinfo.value.invariant == "I15"
 
     def test_do_resync_without_an_id_is_refused(self, qapp, store):
         with pytest.raises(SafetyRefusal):
@@ -584,7 +594,7 @@ class TestDo:
         """A missing entry is a button that does nothing, which the user cannot
         tell apart from a slow one."""
         assert set(Supervisor._ACTIONS) == set(RecoveryAction)
-        assert len(RecoveryAction) == 18
+        assert len(RecoveryAction) == 20   # PIN and UNPIN joined in f58e05a
         for method in Supervisor._ACTIONS.values():
             assert callable(getattr(Supervisor, method))
 
@@ -634,16 +644,28 @@ class TestDo:
         assert mountd.restarted == ["from a toast"]
 
     def test_sign_in_starts_the_auth_flow(self, qapp, store):
+        """SIGN_IN re-authorises the account's own remote, in place.
+
+        The stub used to take no arguments at all, so it could not see either
+        half of the real call. Both are asserted now:
+
+        * the remote, because `AuthFlow.start()` has no default for it;
+        * `update=True`, because SIGN_IN is always a *re*-authentication.
+          `config/create` — what `update=False` selects — deletes the whole
+          `[remote]` section before rewriting it on rclone v1.75.0, taking every
+          backend key the client wrote under I1 with it. `config/update` edits
+          in place.
+        """
         class Auth:
             def __init__(self):
-                self.started = 0
+                self.calls: list[tuple[str, bool]] = []
 
-            def start(self):
-                self.started += 1
+            def start(self, remote, *, update=False, **kw):
+                self.calls.append((remote, update))
 
         auth = Auth()
         supervisor(store, auth=auth).do(RecoveryAction.SIGN_IN)
-        assert auth.started == 1
+        assert auth.calls == [(ACCOUNT.remote, True)]
 
     def test_web_actions_open_a_url(self, qapp, store, monkeypatch):
         opened: list[str] = []
