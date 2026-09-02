@@ -421,6 +421,40 @@ class TestFileDialogs:
     def test_choose_folders_warns_that_unchecking_removes(self, qapp):
         assert ChooseFoldersDialog().spec.body == DIALOG.CHOOSE_FOLDERS_WARN
 
+    def test_the_folder_picker_round_trips_a_selection(self, qapp):
+        """Fill the tree and read back what is unticked — both halves of
+        "Choose folders", exercised the way `page_account` uses them."""
+        from PySide6.QtCore import Qt
+
+        dialog = ChooseFoldersDialog()
+        dialog.tree.add_folder("Photos", rel_path="Photos",
+                               checked=Qt.CheckState.Unchecked)
+        dialog.tree.add_folder("Documents", rel_path="Documents",
+                               checked=Qt.CheckState.Checked)
+        assert dialog.tree.excluded() == ["Photos"]
+
+    def test_page_account_reads_the_tree_as_a_property(self):
+        """`ChooseFoldersDialog.tree` is a `@property`, so `dialog.tree()` calls
+        the `FolderTree` it returns.
+
+        Both call sites did exactly that, and the suite never opened the dialog,
+        so it went out in a release: on 2026-09-02 the journal caught
+        `TypeError: 'FolderTree' object is not callable` from `fill()`. The
+        picker opened empty and OK applied nothing — the uncaught one crashed
+        the fill, the caught one was swallowed by `except Exception` and logged.
+        """
+        source = (UI_ROOT / "pages" / "page_account.py").read_text(
+            encoding="utf-8")
+        offenders = [
+            node.lineno for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "tree"
+        ]
+        assert offenders == [], (
+            f"page_account.py calls .tree() at line(s) {offenders}; "
+            "`tree` is a property")
+
     def test_first_delete_can_be_silenced(self, qapp):
         dialog = FirstDeleteDialog("holiday.jpg")
         assert dialog.spec.remember is DialogKey.FIRST_DELETE

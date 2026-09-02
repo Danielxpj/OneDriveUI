@@ -151,7 +151,7 @@ class AccountPage(QWidget):
             # What the user actually ticked — not `selective.excluded()`, which
             # is the selection that was *already* stored. Applying that made OK
             # a no-op that looked like it had worked.
-            selective.apply(dialog.tree().excluded())
+            selective.apply(dialog.tree.excluded())
         except Exception:  # noqa: BLE001 - a refused change is reported, not silent
             log.error("the folder selection could not be applied", exc_info=True)
 
@@ -179,7 +179,7 @@ class AccountPage(QWidget):
         def fill(nodes: Any) -> None:
             from PySide6.QtCore import Qt
 
-            tree = dialog.tree()
+            tree = dialog.tree
             for node in nodes or ():
                 if not getattr(node, "is_dir", False):
                     continue
