@@ -1258,12 +1258,18 @@ class ThemeManager(QObject):
             app.setStyle("Fusion")
         except Exception:
             pass
-        self._apply_palette(app)
+        self.apply_palette(app)
         app.setStyleSheet(stylesheet(dark=self._dark))
 
-    def _apply_palette(self, app) -> None:
+    def apply_palette(self, app) -> None:
         """QSS does not reach every native primitive (menu shadows, item view
-        backgrounds during a drag), so the palette is kept in step with it."""
+        backgrounds during a drag), so the palette is kept in step with it.
+
+        Public because :func:`apply` is not the only caller that needs it:
+        anything that installs the sheet by hand — `scripts/preview.py` does,
+        to keep its `FocusRingStyle` proxy — must set the palette too, or the
+        window keeps Fusion's light `Window` and `Base` under a dark sheet.
+        """
         try:
             from PySide6.QtGui import QColor, QPalette
         except Exception:

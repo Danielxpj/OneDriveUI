@@ -695,8 +695,8 @@ def svg_bytes(category: str, stem: str, size: int | None = None) -> bytes:
 
 
 def render_svg(data: bytes, px: int, dpr: float = 1.0) -> QPixmap:
-    """-> QPixmap. Allocates round(px*dpr), calls setDevicePixelRatio BEFORE
-    painting, and renders into QRectF(0, 0, dev, dev) in device coordinates."""
+    """-> QPixmap. Allocates round(px*dpr) device pixels, sets the device pixel
+    ratio, and renders into the LOGICAL `px` box — see `_render`."""
     return _render(data, px, px, dpr)
 
 
@@ -707,6 +707,16 @@ def render_svg_rect(data: bytes, w: int, h: int, dpr: float = 1.0) -> QPixmap:
 
 
 def _render(data: bytes, w: int, h: int, dpr: float) -> QPixmap:
+    """The SVG at `w` x `h` LOGICAL pixels, backed by `dpr` times as many.
+
+    The target rectangle is the logical box, not the device one. Once
+    `setDevicePixelRatio()` has been called, a QPainter over the pixmap works in
+    logical coordinates — so rendering into `dev_w x dev_h` draws the art at
+    `dpr` times its size and the pixmap keeps the top-left corner of it. At
+    dpr 2 that is one quarter of an emblem — what `StatusBadge` painted on any
+    screen with a device pixel ratio above 1, since it is the one caller that
+    passes the device's own ratio through.
+    """
     dev_w = max(1, int(round(w * dpr)))
     dev_h = max(1, int(round(h * dpr)))
     pm = QPixmap(dev_w, dev_h)
@@ -716,7 +726,7 @@ def _render(data: bytes, w: int, h: int, dpr: float) -> QPixmap:
     painter = QPainter(pm)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-    renderer.render(painter, QRectF(0, 0, dev_w, dev_h))
+    renderer.render(painter, QRectF(0, 0, dev_w / dpr, dev_h / dpr))
     painter.end()
     return pm
 

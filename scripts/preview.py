@@ -93,6 +93,14 @@ def _settings() -> Any:
 
 
 def _activity() -> Any:
+    """The flyout with a transfer in flight and a few finished rows behind it.
+
+    Two rows left it half the height it has in use and clipped the last one
+    mid-line, which is a screenshot that misrepresents the window. The height
+    is content-driven, so the fix is content: a realistic list, then the resize
+    the application itself does through `preferred_height()`.
+    """
+    from onedriveui.models import ActivityState, ActivityVerb, SyncState
     from onedriveui.ui.activity_center import ActivityCenter
     from tests.fakes.fake_services import FakeSupervisor
 
@@ -100,21 +108,49 @@ def _activity() -> Any:
     supervisor = FakeSupervisor(_account())
     window = ActivityCenter(_account(), supervisor=supervisor,
                             quota=services["quota"])
-    supervisor.emit_activity("Documents/Quarterly Report.docx")
-    supervisor.emit_activity("Photos/holiday.jpg")
+
+    supervisor.emit_activity("Documents/Quarterly Report.docx",
+                             ActivityVerb.UPLOADED,
+                             state=ActivityState.INFLIGHT,
+                             size=18_400_000, done=7_900_000)
+    supervisor.emit_activity("Photos/holiday.jpg", ActivityVerb.UPLOADED,
+                             size=4_200_000)
+    supervisor.emit_activity("Budget 2026.xlsx", ActivityVerb.MODIFIED,
+                             size=812_000)
+    supervisor.emit_activity("Design/logo.svg", ActivityVerb.DOWNLOADED,
+                             size=96_000)
+    supervisor.emit_activity("Archive/2019", ActivityVerb.FREED,
+                             size=2_100_000_000)
+    supervisor.set_state(SyncState.SYNCING)
+
+    window.resize(window.WIDTH, window.preferred_height())
     return window
 
 
-def _wizard() -> Any:
-    from onedriveui.ui.wizard import SetupWizard
+def _wizard(page: str = "welcome") -> Any:
+    """The setup wizard, opened on `page`.
 
-    return SetupWizard(_account(), config=_config(), services=_stub_services())
+    The welcome screen is the one the user sees first and the least
+    interesting to look at: it is a title and an email box. The folder and
+    tutorial pages are where the wizard actually says something, so they are
+    reachable by name rather than by clicking Next four times.
+    """
+    from onedriveui.ui.wizard import PAGES, SetupWizard
+
+    wizard = SetupWizard(_account(), config=_config(),
+                         services=_stub_services())
+    while wizard.current_key != page and wizard.current_key != PAGES[-1]:
+        wizard.next_page()
+    return wizard
 
 
 WINDOWS: dict[str, Callable[[], Any]] = {
     "settings": _settings,
     "activity": _activity,
     "wizard": _wizard,
+    "wizard_folder": lambda: _wizard("folder"),
+    "wizard_tutorial": lambda: _wizard("tutorial"),
+    "wizard_done": lambda: _wizard("done"),
 }
 
 
@@ -167,7 +203,7 @@ def _dialogs() -> dict[str, Callable[[], Any]]:
     }
 
 
-def _apply_theme(app: Any, *, dark: bool) -> None:
+def apply_theme(app: Any, *, dark: bool) -> None:
     """Install the stylesheet exactly as `app.py` does.
 
     Not optional decoration. Qt applies a stylesheet to widgets as they are
@@ -190,6 +226,11 @@ def _apply_theme(app: Any, *, dark: bool) -> None:
     manager = theme.ThemeManager(app)
     manager.set_mode(ThemeMode.DARK if dark else ThemeMode.LIGHT)
     manager.start()
+    # The palette, which `apply()` would have set and which the sheet does not
+    # replace: QSS never paints a QScrollArea's viewport or a QStackedWidget's
+    # backdrop, so without this a dark shot comes out with dark cards floating
+    # on Fusion's light `Window` — the harness looking like a theme bug.
+    manager.apply_palette(app)
     theme.invalidate_detection()
     qss.invalidate()
     icons.clear_cache()
@@ -198,6 +239,30 @@ def _apply_theme(app: Any, *, dark: bool) -> None:
 
 
 _MANAGER: Any = None
+
+
+def settle(app: Any, ms: int) -> None:
+    """Pump the event loop for `ms`, then let the widgets repaint.
+
+    A screenshot taken the instant a window is shown catches its animations
+    mid-flight: `ToggleSwitch` slides its knob over 150 ms, so a switch that is
+    ON renders as OFF and the shot documents a state the application never had.
+    Waiting is not politeness, it is correctness.
+    """
+    from PySide6.QtCore import QElapsedTimer
+    from PySide6.QtWidgets import QApplication
+
+    clock = QElapsedTimer()
+    clock.start()
+    while clock.elapsed() < ms:
+        app.processEvents()
+    # Qt hands the keyboard to the first focusable widget when a window is
+    # shown, so without this every shot carries a focus ring on whatever
+    # happens to be first in the tab order.
+    focused = QApplication.focusWidget()
+    if focused is not None:
+        focused.clearFocus()
+        app.processEvents()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -209,17 +274,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--shot", metavar="DIR",
                         help="render to PNG instead of opening (implies offscreen)")
     parser.add_argument("--theme", choices=("light", "dark"), default="light")
+    parser.add_argument("--dpr", type=float, default=1.0,
+                        help="render shots at this device pixel ratio (2 = HiDPI)")
+    parser.add_argument("--settle", type=int, default=600, metavar="MS",
+                        help="pump the event loop this long before grabbing")
     args = parser.parse_args(argv)
 
     if args.shot:
         import os
 
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        # HiDPI the way a HiDPI screen does it: the window keeps its logical
+        # size and every primitive — text, the SVG glyphs, the toggle tracks —
+        # is painted at `dpr` times the resolution, which is what makes a
+        # screenshot legible on a retina display. It must be set before
+        # QApplication exists, because that is when Qt reads it.
+        if args.dpr and args.dpr != 1.0:
+            os.environ["QT_SCALE_FACTOR"] = str(args.dpr)
 
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
-    _apply_theme(app, dark=args.theme == "dark")
+    apply_theme(app, dark=args.theme == "dark")
 
     everything = {**WINDOWS, **_dialogs()}
 
@@ -246,11 +322,13 @@ def main(argv: list[str] | None = None) -> int:
 
     out = Path(args.shot)
     out.mkdir(parents=True, exist_ok=True)
-    app.processEvents()
+    settle(app, args.settle)
     for name, widget in built:
-        app.processEvents()
+        settle(app, 120)
         path = out / f"{name}-{args.theme}.png"
-        widget.grab().save(str(path), "PNG")
+        shot = widget.grab()
+        shot.setDevicePixelRatio(1.0)
+        shot.save(str(path), "PNG")
         print(path)
     return 0
 

@@ -522,6 +522,43 @@ def test_paint_status_badge_punches_a_ring(qapp):
     assert cleared, "no separation ring was cut out"
 
 
+@pytest.mark.slow
+@pytest.mark.parametrize("dpr", [1.0, 2.0, 3.0])
+def test_the_badge_art_fills_the_box_at_every_ratio(qapp, dpr):
+    """The whole emblem, not its top-left corner.
+
+    `icons._render` allocates `px * dpr` device pixels and calls
+    `setDevicePixelRatio()` on the pixmap, which puts the painter over it into
+    LOGICAL coordinates. Rendering the SVG into the DEVICE rectangle therefore
+    drew the art at `dpr` times its size and kept only the part that fitted:
+    at dpr 2, one quarter of an emblem on every HiDPI screen. Comparing the
+    scaled render against the 1x one is the check that catches it — the size
+    and the ratio were both right while the picture was wrong.
+    """
+    size = SPACING["xl"]
+    stem = icons.emblem_name(FileState.LOCAL)
+    data = icons.svg_bytes("emblems", icons.emblem_icon_name(stem))
+
+    reference = icons.render_svg(data, size, 1.0).toImage()
+    scaled = icons.render_svg(data, size, dpr).toImage().scaled(
+        reference.width(), reference.height(),
+        Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation)
+
+    assert scaled.size() == reference.size()
+    off = sum(
+        1
+        for y in range(reference.height())
+        for x in range(reference.width())
+        if abs(reference.pixelColor(x, y).alpha()
+               - scaled.pixelColor(x, y).alpha()) > 96
+    )
+    # Antialiasing differs between the two rasterisations, so a handful of edge
+    # pixels is expected; a quarter-of-the-art crop is thousands.
+    assert off < reference.width() * reference.height() * 0.05, (
+        f"the dpr {dpr} render does not match the 1x art ({off} pixels differ)")
+
+
 def test_status_badge_widget(qapp):
     badge = StatusBadge(state=FileState.PINNED)
     assert badge.state() is FileState.PINNED

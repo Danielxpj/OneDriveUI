@@ -11,7 +11,10 @@ features and its wording, on top of **[rclone](https://rclone.org)** as the sync
 [![Platform: Linux](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)](#compatibility)
 [![Status: alpha](https://img.shields.io/badge/Status-alpha-orange.svg)](#status-alpha)
 
-![OneDriveUI on Linux: Settings, the Activity Center and the setup wizard, dark theme](docs/gallery-dark.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/shot-hero-dark.png">
+  <img alt="OneDriveUI on Linux: the Settings window and the Activity Center flyout, showing a sync in progress" src="docs/shot-hero-light.png">
+</picture>
 
 Works with **OneDrive Personal** and **OneDrive for Business / Microsoft 365**. Free and open source,
 no account beyond your Microsoft one, nothing phones home.
@@ -39,7 +42,7 @@ no account beyond your Microsoft one, nothing phones home.
 
 All fifteen work packages are built and the client works against a real account, but:
 
-- **28 of the 4303 tests currently fail.** They are the ones that still assert against three modules
+- **28 of the 4306 tests currently fail.** They are the ones that still assert against three modules
   the last refactor deleted and against signatures it changed — `test_supervisor`, `test_contracts`,
   `test_config` and their neighbours. Known, catalogued, not yet rewritten.
 - It has not been through the 24-hour stress run, and the Nautilus integration has not been exercised
@@ -70,6 +73,13 @@ onedriveui       # first run opens the setup wizard, which signs you in
 Want to look before you leap? `./scripts/install.sh --check` reports what is missing and changes
 nothing.
 
+The first run is the setup wizard — Windows' own, minus the three screens that happen in the browser:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/shot-wizard-dark.png">
+  <img alt="The setup wizard: the welcome screen, choosing your OneDrive folder, and the tutorial page" src="docs/shot-wizard-light.png">
+</picture>
+
 ---
 
 ## What you get
@@ -85,7 +95,12 @@ nothing.
 | **First run** | A seven-page setup wizard: sign in, pick a folder, choose what syncs — Windows' nine screens minus the three that happen inside the browser |
 | **Command line** | `--state`, `--status`, `--doctor`, `--pause`, `--diagnostics` — the same engine, headless |
 
-![Settings, the Activity Center and the wizard, light theme](docs/gallery-light.png)
+**Files On-Demand, in the words Windows uses.** The same badges Nautilus paints beside your files:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/shot-states-dark.png">
+  <img alt="File status badges: available when online, available on this device, always available on this device, syncing, not syncing, sync problem" src="docs/shot-states-light.png">
+</picture>
 
 ---
 
@@ -323,6 +338,14 @@ Fifteen hard invariants are enforced in code by `onedriveui/rc/guards.py`, which
 
 The full table, with the failure each one prevents, is §3 of `docs/ARCHITECTURE.md`.
 
+It shows in the dialogs. When four thousand files vanish from the cloud, the accent button — the one
+a hurried person hits — says **Restore files**. The destructive answer is never the default:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/shot-dialogs-dark.png">
+  <img alt="Three dialogs: the mass-delete confirmation with Restore files as the primary button, Free up disk space, and Reset sync" src="docs/shot-dialogs-light.png">
+</picture>
+
 ---
 
 ## Known limitations
@@ -369,11 +392,31 @@ real one. Open it with `Ctrl+L` or `Ctrl+H`.
 ## Development
 
 ```bash
-QT_QPA_PLATFORM=offscreen python3 -m pytest -q   # 4303 tests, ~3 min (28 known failures)
-scripts/preview.py --list                 # every window and dialog, on its own
-scripts/preview.py settings
-scripts/preview.py --all --shot /tmp/ui   # a PNG of each, headless
+QT_QPA_PLATFORM=offscreen python3 -m pytest -q   # 4306 tests, ~3 min (28 known failures)
+scripts/preview.py --list                        # every window and dialog, on its own
+scripts/preview.py settings                      # open it on your display
+scripts/preview.py --all --shot /tmp/ui --dpr 2  # a PNG of each, headless
+scripts/shots.py                                 # the screenshots in this README
+scripts/gallery.py                               # the widget-kit contact sheet
 ```
+
+Every window above is built with stub services, so the mass-delete dialog can be looked at without
+deleting four thousand files, and the README's screenshots are of the same windows the application
+opens — there is no prettier second construction that exists only for the picture.
+
+<details>
+<summary>The widget kit, as a contact sheet (<code>scripts/gallery.py</code>)</summary>
+
+Every control in both themes, on one page: the type ramp, the buttons, the file-status badges, the
+info bars, the settings cards and the two-tone focus ring — the sheet a human reads to judge Fluent
+fidelity without running the application.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/gallery-dark.png">
+  <img alt="Contact sheet of the whole Fluent widget kit" src="docs/gallery-light.png">
+</picture>
+
+</details>
 
 94 modules, ~52k lines of application code, 55 test files and ~37k lines of tests. The build was
 directed by three documents treated as
