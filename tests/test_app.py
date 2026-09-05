@@ -51,8 +51,8 @@ def ext_namespace() -> dict:
         node for node in tree.body
         if not (isinstance(node, (ast.Import, ast.ImportFrom))
                 and "gi" in ast.dump(node))
-        and not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-                 and ast.dump(node.value).find("require_version") >= 0)
+        and not (isinstance(node, (ast.Expr, ast.For, ast.Try))
+                 and ast.dump(node).find("require_version") >= 0)
         and not isinstance(node, ast.ClassDef)
     ]
     namespace: dict = {}

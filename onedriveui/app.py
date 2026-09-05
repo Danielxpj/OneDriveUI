@@ -576,6 +576,54 @@ def _mount_options(cfg: Any, account: AccountInfo) -> dict[str, Any]:
     return {f: getattr(section, f) for f in getattr(section, "__slots__", ())}
 
 
+def _scan_cache(pool: Any, filestate: Any, ipc: Any) -> None:
+    """Walk the VFS cache into ``cache_index``, then repaint the file manager.
+
+    `FileStateService.rebuild()` is what fills the table every emblem is read
+    from, and nothing called it: the ``cache_scan`` job had no runner, so the
+    Supervisor skipped it with a debug line and the table stayed empty. An
+    empty table answers ``unknown`` for every path — deliberately, so a badge
+    is never invented — and the extension draws nothing for ``unknown``. The
+    whole Nautilus integration was therefore loading correctly and showing
+    nothing.
+
+    The walk is IOPool work (``cache_scan`` is a single-slot kind, because two
+    rewrites of the same table would race). When it lands, every connected
+    extension is told the root changed, which is the only way Nautilus re-asks.
+    """
+    def done(rows: Any) -> None:
+        if ipc is None or not rows:
+            return
+        try:
+            ipc.broadcast_invalidate([filestate.account.sync_root])
+        except Exception:  # noqa: BLE001 - a repaint hint must not kill the job
+            log.debug("could not broadcast the cache scan", exc_info=True)
+
+    pool.submit(filestate.rebuild, kind="cache_scan", on_done=done)
+
+
+def _scan_cache_once_mounted(account: AccountInfo, run: Any) -> None:
+    """Run the first cache scan as soon as this account's mount is healthy.
+
+    The scheduled ``cache_scan`` is seeded as "just ran", so left alone the
+    first walk would happen six hours after start-up — six hours without an
+    emblem. Scanning at start-up instead is not enough either: the walk needs
+    the mount's rc, which is not up yet when the engine is built.
+    """
+    from onedriveui.models import MountHealth
+
+    fired = False
+
+    def on_health(acc_id: str, health: Any) -> None:
+        nonlocal fired
+        if fired or acc_id != account.id or health is not MountHealth.UP:
+            return
+        fired = True
+        run()
+
+    BUS.mount_health.connect(on_health)
+
+
 def build_engine(account: AccountInfo, *, cfg: Any = None,
                  writer: Any = None, headless: bool = False) -> Engine:
     """Wire the engine for one account, in :data:`STARTUP_ORDER`.
@@ -687,6 +735,14 @@ def build_engine(account: AccountInfo, *, cfg: Any = None,
     bandwidth = BandwidthController(endpoints=live_endpoints, writer=writer)
     pause = PauseManager(account, writer=writer,
                          config_get=lambda key, default=None: cfg.get(key, default))
+    # Before any other write. See `db.ensure_account`: without this row every
+    # write below it is refused by the foreign key, silently.
+    try:
+        writer.submit_sync(lambda conn: db.ensure_account(conn, account),
+                           label="ensure_account")
+    except Exception:  # noqa: BLE001 - reported; the services still build
+        log.error("could not record account %s in the database", account.id,
+                  exc_info=True)
     issues = IssueEngine(account, writer=writer)
     activity = ActivityFeed(account, writer=writer, issues=issues)
     decisions = DecisionCenter(account, writer=writer)
@@ -755,7 +811,12 @@ def build_engine(account: AccountInfo, *, cfg: Any = None,
         # a round trip to Microsoft, so a slow network froze the tray for as
         # long as the cloud took to answer. ARCHITECTURE §7.6 bans exactly this.
         jobs_runner={"quota": lambda: _refresh_quota(pool, quota, engine_ref),
+                     "cache_scan": lambda: _scan_cache(pool, filestate, ipc),
                      "prune": lambda: _prune(writer, decisions)})
+    # The first walk, so the emblems appear at start-up rather than at the
+    # first six-hourly scan. See `_scan_cache` for why there were none at all.
+    if not headless:
+        _scan_cache_once_mounted(account, lambda: _scan_cache(pool, filestate, ipc))
 
     # The engine is handed to the services that need to act through it, after
     # the Supervisor exists. `do()` is the single entry point, so this back

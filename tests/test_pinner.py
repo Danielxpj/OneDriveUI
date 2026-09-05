@@ -408,3 +408,13 @@ class TestFileState:
         bus_spy.watch("file_states_invalidated")
         self.service(account, store).invalidate([])
         assert bus_spy.count("file_states_invalidated") == 0
+
+    def test_after_a_scan_an_unindexed_path_is_online_only(self, qapp, account, store):
+        """Once the VFS cache has been walked, "no row" means "not on disk":
+        the file is served from the cloud, which is exactly the cloud badge."""
+        self.seed(account, store, CacheEntry(rel_path="cached.txt",
+                                             state=FileState.LOCAL, size=1,
+                                             bytes_local=1))
+        svc = self.service(account, store)
+        assert svc.status("cached.txt").state is FileState.LOCAL
+        assert svc.status("never-opened.txt").state is FileState.ONLINE_ONLY

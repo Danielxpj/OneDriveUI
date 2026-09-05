@@ -202,12 +202,23 @@ class _Task(QRunnable):
             kwargs = dict(self._kwargs)
             if self._wants_token:
                 kwargs["token"] = self._token
-            if self._wants_progress:
+            if self._wants_progress and "progress" not in kwargs:
                 # `on_progress` was accepted, connected, and then never given
                 # anything to emit through: the task had no way to report.
                 # Handed over the same way the token is — only to a callable
-                # that asks for it.
-                kwargs["progress"] = self._signals.progress.emit
+                # that asks for it, and never over one the caller supplied.
+                #
+                # The signal carries ONE object, but the tasks report in pairs
+                # — `vfs.scan` says ``(seen, generation)``, the pinner
+                # ``(done, total)`` — and `Signal.emit` refuses a second
+                # argument with a `TypeError` that killed the cache scan on its
+                # first callback. Several arguments travel as a tuple.
+                emit = self._signals.progress.emit
+
+                def progress(*values: Any) -> None:
+                    emit(values[0] if len(values) == 1 else values)
+
+                kwargs["progress"] = progress
             try:
                 result = self._fn(*self._args, **kwargs)
             except Cancelled:

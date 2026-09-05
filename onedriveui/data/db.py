@@ -336,6 +336,40 @@ def close_all() -> None:
 # Migration
 # ─────────────────────────────────────────────────────────────────────────────
 
+def ensure_account(conn: sqlite3.Connection, account: Any) -> None:
+    """Make sure `account` has its row, so its other rows can exist.
+
+    Every per-account table references ``accounts(id)`` and ``foreign_keys``
+    is on, but accounts live in ``config.json`` and nothing ever wrote them
+    here. Every write for the account — activity, pins, the cache index, the
+    file states behind the emblems — failed with ``FOREIGN KEY constraint
+    failed``, reported only on the log bus, and every table stayed empty.
+
+    Insert-or-update on the columns the config knows; the ones the cloud
+    fills in later (drive, quota, avatar) are left alone on conflict.
+
+    Args:
+        conn: The writer's connection — this runs as one of its ops.
+        account: The `AccountInfo`.
+    """
+    conn.execute(
+        "INSERT INTO accounts (id, remote, kind, display_name, email, drive_id, "
+        "drive_type, sync_root, enabled, added_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET remote = excluded.remote, "
+        "kind = excluded.kind, sync_root = excluded.sync_root, "
+        "enabled = excluded.enabled, "
+        "display_name = COALESCE(NULLIF(excluded.display_name, ''), display_name), "
+        "email = COALESCE(NULLIF(excluded.email, ''), email), "
+        "drive_id = COALESCE(NULLIF(excluded.drive_id, ''), drive_id), "
+        "drive_type = COALESCE(NULLIF(excluded.drive_type, ''), drive_type)",
+        (str(account.id), str(account.remote), str(account.kind),
+         str(account.display_name or ""), str(account.email or ""),
+         str(account.drive_id or ""), str(account.drive_type or ""),
+         str(account.sync_root), int(bool(account.enabled)),
+         str(account.added_at or utcnow_iso())))
+
+
 def _has_table(conn: sqlite3.Connection, name: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",

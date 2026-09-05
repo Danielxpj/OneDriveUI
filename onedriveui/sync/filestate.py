@@ -90,6 +90,9 @@ class FileStateService(QObject):
         self._excluded: set[str] = set()
         self._pinned: set[str] = set()
         self._dirty: set[str] = set()
+        #: Whether a cache scan has ever completed for this account. Decides
+        #: what a path with no row means; see `_merge`. ``None`` until asked.
+        self._scanned: bool | None = None
 
     # ═════════════════════════════════════════════════════════════════════════
     # Reads — the IPC hot path
@@ -130,10 +133,14 @@ class FileStateService(QObject):
         except Exception:  # noqa: BLE001 - the extension must never see a traceback
             log.error("could not read cache_index", exc_info=True)
             rows = {}
+            readable = False
+        else:
+            readable = True
 
         out: dict[str, FileStatus] = {}
         for rel_path in rel_paths:
-            out[rel_path] = self._merge(rel_path, rows.get(rel_path))
+            out[rel_path] = self._merge(rel_path, rows.get(rel_path),
+                                        indexed=readable and self._has_scanned())
 
         elapsed_ms = (time.monotonic() - started) * 1000.0
         if elapsed_ms > BUDGET_MS:
@@ -141,17 +148,46 @@ class FileStateService(QObject):
                         len(rel_paths), elapsed_ms, BUDGET_MS)
         return out
 
-    def _merge(self, rel_path: str, row: Any) -> FileStatus:
-        """Combine cache state, pins, exclusions and issues into one badge."""
+    def _has_scanned(self) -> bool:
+        """Whether `cache_index` has ever been written for this account."""
+        if self._scanned is None:
+            try:
+                self._scanned = repo_files.cache_generation(self.account.id) > 0
+            except Exception:  # noqa: BLE001 - answer "unknown" rather than raise
+                log.debug("could not read the cache generation", exc_info=True)
+                return False
+        return self._scanned
+
+    def _merge(self, rel_path: str, row: Any, *, indexed: bool = True) -> FileStatus:
+        """Combine cache state, pins, exclusions and issues into one badge.
+
+        Args:
+            rel_path: The path.
+            row: Its `cache_index` row, ``None`` or an ``UNKNOWN`` status when
+                it has none.
+            indexed: Whether that ``None`` is trustworthy — the index was
+                readable and a scan has completed. Only then does "no row"
+                mean "not on this disk".
+        """
         if rel_path in self._excluded:
             # The user said not to sync this. Reporting "Sync problem" on a file
             # they deliberately excluded would be actively misleading.
             return FileStatus(rel_path=rel_path, state=FileState.EXCLUDED,
                               excluded=True)
-        if row is None:
-            # Not scanned yet. ONLINE_ONLY would claim knowledge we do not have,
-            # and it renders identically to a real cloud badge.
-            return FileStatus(rel_path=rel_path, state=FileState.UNKNOWN)
+        # `repo_files.file_states` synthesises an UNKNOWN status for a path with
+        # no row, so "no row" arrives both ways.
+        if row is None or getattr(row, "state", FileState.UNKNOWN) is FileState.UNKNOWN:
+            if not indexed:
+                # Not scanned yet, or the index could not be read. ONLINE_ONLY
+                # would claim knowledge we do not have, and it renders
+                # identically to a real cloud badge.
+                return FileStatus(rel_path=rel_path, state=FileState.UNKNOWN)
+            # The scan walked the whole VFS cache and this path is not in it:
+            # the mount serves it from the cloud. That IS the cloud badge — and
+            # without it every file the user has never opened had no emblem at
+            # all, which reads as "not synced" next to its cached neighbours.
+            return FileStatus(rel_path=rel_path, state=FileState.ONLINE_ONLY,
+                              pinned=rel_path in self._pinned)
 
         state = getattr(row, "state", FileState.UNKNOWN)
         size = getattr(row, "size", 0)
@@ -235,6 +271,7 @@ class FileStateService(QObject):
                                                     writer=self._writer)
         log.info("cache index rebuilt for %s: %d rows, %d stale rows pruned",
                  self.account.id, len(rows), removed)
+        self._scanned = True
         self.refresh_overlays()
         return len(rows)
 

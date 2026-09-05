@@ -45,7 +45,16 @@ from typing import Any
 
 import gi
 
-gi.require_version("Nautilus", "4.0")
+# Nautilus 50 ships the 4.1 typelib; earlier releases ship 4.0. Everything this
+# file uses exists in both, so take whichever is installed, newest first.
+for _api in ("4.1", "4.0"):
+    try:
+        gi.require_version("Nautilus", _api)
+        break
+    except ValueError:
+        continue
+else:
+    raise ImportError("no Nautilus 4.x typelib found (need nautilus-python)")
 from gi.repository import GObject, Nautilus  # noqa: E402
 
 # ═════════════════════════════════════════════════════════════════════════════

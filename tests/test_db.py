@@ -478,3 +478,47 @@ def test_a_path_with_a_question_mark_is_escaped_for_the_uri(tmp_path):
     db.close_rw(path)
     assert db.open_ro(path).execute("SELECT value FROM kv").fetchone()[0] == "v"
     db.close_ro(path)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# The account row every other row hangs off
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestEnsureAccount:
+    """`ensure_account` is what makes the foreign keys satisfiable at all.
+
+    Accounts live in config.json and nothing wrote them here, so with
+    ``foreign_keys`` on every per-account write was refused. Keyed rows must
+    insert after it, and a second call must update rather than fail.
+    """
+
+    def _account(self, **overrides):
+        from onedriveui.models import AccountInfo
+        fields = dict(id="acc", remote="acc", sync_root="/tmp/acc")
+        fields.update(overrides)
+        return AccountInfo(**fields)
+
+    def test_a_keyed_row_inserts_once_the_account_exists(self, dbpath):
+        conn = db.open_rw(dbpath)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO cache_index (account_id, rel_path, state, "
+                         "scan_generation, updated_at) VALUES "
+                         "('acc', 'a', 'local', 1, 'now')")
+        db.ensure_account(conn, self._account())
+        conn.execute("INSERT INTO cache_index (account_id, rel_path, state, "
+                     "scan_generation, updated_at) VALUES "
+                     "('acc', 'a', 'local', 1, 'now')")
+        conn.commit()
+        assert conn.execute("SELECT count(*) FROM cache_index").fetchone()[0] == 1
+
+    def test_a_second_call_updates_and_keeps_what_the_cloud_filled(self, dbpath):
+        conn = db.open_rw(dbpath)
+        db.ensure_account(conn, self._account(email="a@b.c"))
+        conn.execute("UPDATE accounts SET drive_id = 'd1', quota_total = 5 "
+                     "WHERE id = 'acc'")
+        db.ensure_account(conn, self._account(sync_root="/tmp/moved"))
+        conn.commit()
+        row = conn.execute("SELECT sync_root, email, drive_id, quota_total "
+                           "FROM accounts WHERE id = 'acc'").fetchone()
+        assert tuple(row) == ("/tmp/moved", "a@b.c", "d1", 5)
+        assert conn.execute("SELECT count(*) FROM accounts").fetchone()[0] == 1

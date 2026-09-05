@@ -549,9 +549,62 @@ class MountController(QObject):
             return cached
         found = _endpoints.load_endpoints().get(
             _endpoints.endpoint_key("mount", account.id))
+        if found is None:
+            found = self._endpoint_from_unit(account)
         if found is not None:
             self._endpoints[account.id] = found
         return found
+
+    def _endpoint_from_unit(self, account: AccountInfo) -> RcEndpoint | None:
+        """Recover the mount's rc endpoint from its unit file.
+
+        `endpoints.json` lives in the runtime directory, which is wiped at
+        logout, and `ensure_mounted()` records an endpoint only for a mount it
+        starts itself. A mount systemd brought up with the session — the
+        normal case, since the unit is ``PartOf=graphical-session.target`` —
+        was therefore healthy and unknown at once: nothing could reach its
+        ``vfs/*``, so the cache index stayed empty, the emblems blank and the
+        transfer view dark, with a "no mount rc endpoint" warning every start.
+
+        The unit text is ours (`unit_text`), so its ``ExecStart`` is the
+        ``build_argv()`` tokens joined by single spaces with ``%`` doubled —
+        the three rc flags are single tokens and parse back exactly.
+
+        Returns:
+            The endpoint, also saved to `endpoints.json`, or ``None`` when
+            there is no unit or it carries no rc flags.
+        """
+        try:
+            from onedriveui.platform import systemd as _systemd_mod
+            text = _systemd_mod.read_unit(self.unit_name(account))
+        except Exception:  # noqa: BLE001 - a recovery path never raises
+            log.debug("could not read the mount unit for %s", account.id,
+                      exc_info=True)
+            return None
+        exec_start = next((line[len("ExecStart="):] for line in text.splitlines()
+                           if line.startswith("ExecStart=")), "")
+        tokens = [tok.replace("%%", "%") for tok in exec_start.split(" ")]
+        flags: dict[str, str] = {}
+        for i, tok in enumerate(tokens[:-1]):
+            if tok in ("--rc-addr", "--rc-user", "--rc-pass"):
+                flags[tok] = tokens[i + 1]
+        addr = flags.get("--rc-addr", "")
+        host, _, port_text = addr.rpartition(":")
+        if not port_text.isdigit() or "--rc-user" not in flags \
+                or "--rc-pass" not in flags:
+            return None
+        ep = RcEndpoint(kind="mount", host=host or "127.0.0.1",
+                        port=int(port_text), user=flags["--rc-user"],
+                        password=flags["--rc-pass"],
+                        mountpoint=str(self.mountpoint(account)),
+                        account_id=account.id)
+        try:
+            _endpoints.save_endpoint(ep)
+        except Exception:  # noqa: BLE001 - the in-memory copy still serves
+            log.debug("could not save the recovered endpoint", exc_info=True)
+        log.info("recovered the mount rc endpoint for %s from its unit: %s",
+                 account.id, ep.base_url)
+        return ep
 
     def health(self, account: AccountInfo) -> MountHealth:
         """Invariant I6 applied to this account's mountpoint.
