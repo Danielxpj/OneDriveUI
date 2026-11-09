@@ -291,10 +291,11 @@ class TestWriteUnit:
         assert SD.read_unit(UNIT_RCD).endswith("\n")
         assert SD.write_unit(UNIT_RCD, "[Unit]\nDescription=x") is False
 
-    def test_the_file_mode_is_0644(self, fake_sd):
+    def test_the_file_mode_is_owner_only(self, fake_sd):
+        """The unit carries the rc password, so nobody else may read it."""
         SD.write_unit(UNIT_RCD, GOOD_UNIT)
         mode = stat.S_IMODE(SD.unit_file(UNIT_RCD).stat().st_mode)
-        assert mode == SD.UNIT_FILE_MODE == 0o644
+        assert mode == SD.UNIT_FILE_MODE == 0o600
 
     def test_no_temporary_file_is_left_behind(self, fake_sd):
         SD.write_unit(UNIT_RCD, GOOD_UNIT)

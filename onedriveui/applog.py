@@ -103,11 +103,12 @@ REDACT_PATTERNS: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
         (?:"[^"]*"|'[^']*'|[^\s,;}&"']+)
     """), REDACTED),
     # The rc daemon's generated credentials, on a command line (`--rc-pass x`,
-    # `--rc-pass=x`) or in endpoints.json (`"rc-pass": "x"`). The optional quote
-    # after the key name matters: without it the JSON form matches only `": "`
-    # and leaves the secret itself in the line.
+    # `--rc-pass=x`), in a unit file or environment dump (`RCLONE_RC_PASS=x`)
+    # or in endpoints.json (`"rc-pass": "x"`). The optional quote after the
+    # key name matters: without it the JSON form matches only `": "` and
+    # leaves the secret itself in the line.
     (re.compile(r"""(?ix)
-        (?:--)?\brc[-_]pass(?:word)?\b["']?\s*(?:[=:]|\s)\s*
+        (?:\bRCLONE_|--|\b)rc[-_]pass(?:word)?\b["']?\s*(?:[=:]|\s)\s*
         (?:"[^"]*"|'[^']*'|[^\s,;}&"']+)
     """), REDACTED),
     (re.compile(r"""(?ix)

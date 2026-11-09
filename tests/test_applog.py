@@ -67,6 +67,7 @@ def test_redact_removes_the_key_name_not_just_the_value():
     ("Authorization: Bearer EwBYA8l6BAAU", "EwBYA8l6BAAU"),
     ("rclone rcd --rc-user u --rc-pass hunter2GENERATED", "hunter2GENERATED"),
     ('{"rc-pass": "s3cret-generated"}', "s3cret-generated"),
+    ("Environment=RCLONE_RC_PASS=envGENERATEDsecret", "envGENERATEDsecret"),
     ('{"pass": "sekrit"}', "sekrit"),
     ("https://login.live.com/oauth?code=M.R3_BAY.abcdef", "M.R3_BAY.abcdef"),
     ('{"client_secret": "abc123def"}', "abc123def"),

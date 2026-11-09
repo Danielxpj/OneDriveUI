@@ -30,6 +30,7 @@ path here testable without touching the real user manager.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Final, Protocol
 
@@ -106,6 +107,57 @@ def unit_escape(text: str) -> str:
         The escaped literal.
     """
     return str(text).replace("%", "%%")
+
+
+#: The environment variable rclone reads in place of ``--rc-pass``. Every
+#: rclone flag has an ``RCLONE_``-prefixed twin; this one keeps the secret out
+#: of ``/proc/<pid>/cmdline``, which is world-readable, and inside
+#: ``/proc/<pid>/environ``, which only the owning user can open.
+RC_PASS_ENV = "RCLONE_RC_PASS"
+
+
+def rc_pass_env_line(password: str) -> str:
+    """The ``[Service]`` line that hands rclone its rc password.
+
+    Args:
+        password: The generated secret. ``token_urlsafe`` output never carries
+            whitespace or quotes, so the value needs no quoting; ``%`` is still
+            doubled because systemd expands specifiers in ``Environment=``.
+
+    Returns:
+        ``Environment=RCLONE_RC_PASS=<password>``.
+
+    Raises:
+        ValueError: If the password contains whitespace or a quote, which the
+            unquoted form could not carry back out intact.
+    """
+    if re.search(r"[\s\"']", password):
+        raise ValueError("rc password must not contain whitespace or quotes")
+    return f"Environment={RC_PASS_ENV}={unit_escape(password)}"
+
+
+def rc_pass_from_unit(text: str) -> str | None:
+    """Recover the rc password a unit file carries.
+
+    Args:
+        text: The unit text, as written by :func:`rc_pass_env_line` or, for a
+            unit from before the password left the command line, with
+            ``--rc-pass`` in ``ExecStart=``.
+
+    Returns:
+        The password with ``%%`` folded back to ``%``, or ``None``.
+    """
+    prefix = f"Environment={RC_PASS_ENV}="
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix):].strip('"').replace("%%", "%")
+    exec_start = next((line[len("ExecStart="):] for line in text.splitlines()
+                       if line.startswith("ExecStart=")), "")
+    tokens = exec_start.split(" ")
+    for i, tok in enumerate(tokens[:-1]):
+        if tok == "--rc-pass":
+            return tokens[i + 1].replace("%%", "%")
+    return None
 
 
 def execute_id_of(ep: RcEndpoint, timeout_s: float = 2.0) -> str:
@@ -196,9 +248,12 @@ class RcdSupervisor(QObject):
         Args:
             port: The loopback port to bind.
             user: ``--rc-user``.
-            password: ``--rc-pass``. Written into a unit file under
-                ``~/.config/systemd/user``; the file is not world-readable, and
-                the password is regenerated on every provision.
+            password: The rc password. Handed over as ``Environment=``
+                (see :data:`RC_PASS_ENV`), never as ``--rc-pass``: a command
+                line is readable by every user on the machine through
+                ``/proc``. The unit file under ``~/.config/systemd/user`` is
+                not world-readable, and the password is regenerated on every
+                provision.
             rclone_path: The rclone binary.
             user_agent: ``--user-agent``.
             job_expire: ``--rc-job-expire-duration``.
@@ -218,7 +273,7 @@ class RcdSupervisor(QObject):
             unit_escape(token) for token in (
                 rclone_path, "rcd",
                 "--rc-addr", f"127.0.0.1:{int(port)}",
-                "--rc-user", user, "--rc-pass", password,
+                "--rc-user", user,
                 "--rc-job-expire-duration", job_expire,
                 "--rc-job-expire-interval", job_expire_interval,
                 "--rc-server-write-timeout", "1h",
@@ -236,6 +291,7 @@ class RcdSupervisor(QObject):
             "\n"
             "[Service]\n"
             "Type=simple\n"
+            f"{rc_pass_env_line(password)}\n"
             f"ExecStart={exec_start}\n"
             "Restart=always\n"
             "RestartSec=5\n"

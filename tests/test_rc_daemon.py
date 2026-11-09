@@ -28,7 +28,8 @@ from onedriveui.errors import DaemonForeign, DaemonUnavailable
 from onedriveui.models import DaemonHealth, RcEndpoint
 from onedriveui.rc import daemon as daemon_mod
 from onedriveui.rc import endpoints as _endpoints
-from onedriveui.rc.daemon import RcdSupervisor, execute_id_of, unit_escape
+from onedriveui.rc.daemon import (RcdSupervisor, execute_id_of, rc_pass_from_unit,
+                                  unit_escape)
 from tests.conftest import REAL_HOME
 
 FOREIGN_PORT = 5572          # the user's own `rclone mount … --rc-addr 5572`
@@ -155,7 +156,17 @@ class TestUnitText:
     def test_it_runs_rcd_on_our_exact_address(self, text):
         assert "/usr/bin/rclone rcd" in text
         assert "--rc-addr 127.0.0.1:17800" in text
-        assert "--rc-user onedriveui --rc-pass s3cret" in text
+        assert "--rc-user onedriveui" in text
+
+    def test_the_password_goes_through_the_environment_not_the_argv(self, text):
+        """`/proc/<pid>/cmdline` is world-readable; `environ` is not."""
+        assert "Environment=RCLONE_RC_PASS=s3cret" in text
+        assert "--rc-pass" not in text
+        assert rc_pass_from_unit(text) == "s3cret"
+
+    def test_an_old_unit_with_rc_pass_on_the_command_line_still_parses(self):
+        old = "[Service]\nExecStart=/usr/bin/rclone rcd --rc-user u --rc-pass old%%p\n"
+        assert rc_pass_from_unit(old) == "old%p"
 
     def test_the_job_expiry_is_ten_minutes_not_rclone_s_sixty_seconds(self, text):
         """rclone's 60 s default garbage-collects a finished job's `output`
@@ -205,7 +216,8 @@ class TestUnitText:
     def test_a_percent_in_a_value_is_escaped_for_systemd(self):
         """`%` introduces a specifier; an unescaped one silently expands."""
         text = RcdSupervisor.unit_text(17800, "onedriveui", "a%hb")
-        assert "--rc-pass a%%hb" in text
+        assert "Environment=RCLONE_RC_PASS=a%%hb" in text
+        assert rc_pass_from_unit(text) == "a%hb"
         assert unit_escape("100%") == "100%%"
 
 
@@ -509,7 +521,8 @@ class TestEnsureRunning:
         systemd = _Systemd()
         ep = RcdSupervisor(systemd, startup_grace_s=1.0).ensure_running()
         assert len(ep.password) == 43
-        assert f"--rc-pass {ep.password}" in systemd.units[UNIT_RCD]
+        assert f"Environment=RCLONE_RC_PASS={ep.password}" in systemd.units[UNIT_RCD]
+        assert "--rc-pass" not in systemd.units[UNIT_RCD]
 
     def test_a_unit_that_never_answers_raises_daemon_unavailable(self, qapp,
                                                                  monkeypatch):

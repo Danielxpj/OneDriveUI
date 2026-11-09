@@ -174,7 +174,7 @@ class TestBuildArgv:
             "--exclude", "/.onedriveui-trash/**",
             "--exclude", "/.onedriveui-versions/**",
             "--rc", "--rc-addr", f"127.0.0.1:{PORT}",
-            "--rc-user", "onedriveui", "--rc-pass", "s3cret",
+            "--rc-user", "onedriveui",
             "--user-agent", USER_AGENT,
             "--use-json-log", "--color", "NEVER", "--log-level", "INFO",
         ]

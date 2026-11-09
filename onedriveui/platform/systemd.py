@@ -81,9 +81,10 @@ NOT_FOUND: Final[str] = "not-found"
 # Unit files
 # ─────────────────────────────────────────────────────────────────────────────
 
-#: A unit file is readable by the whole desktop; it holds no secret. (The rc
-#: password lives in `endpoints.json` at 0600 and reaches units by environment.)
-UNIT_FILE_MODE: Final[int] = 0o644
+#: Owner-only: the rcd and mount units carry the rc password on an
+#: ``Environment=RCLONE_RC_PASS=`` line (see `rc/daemon.py`), so the file is a
+#: secret even though ``~/.config/systemd/user`` is normally under a 0700 home.
+UNIT_FILE_MODE: Final[int] = 0o600
 
 _UNIT_SUFFIXES: Final[tuple[str, ...]] = (
     ".service", ".socket", ".target", ".timer", ".path", ".slice", ".mount", ".scope",

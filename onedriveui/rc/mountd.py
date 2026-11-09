@@ -55,7 +55,8 @@ from onedriveui.rc import FUSERMOUNT3, RCLONE_DEFAULT
 from onedriveui.rc import endpoints as _endpoints
 from onedriveui.rc import guards
 from onedriveui.rc.client import call_blocking, is_alive
-from onedriveui.rc.daemon import SystemdLike, unit_escape
+from onedriveui.rc.daemon import (SystemdLike, rc_pass_env_line,
+                                  rc_pass_from_unit, unit_escape)
 
 __all__ = [
     "DEFAULT_MOUNT_OPTIONS",
@@ -475,7 +476,7 @@ class MountController(QObject):
         argv += [
             "--rc",
             "--rc-addr", f"127.0.0.1:{int(port)}",
-            "--rc-user", user, "--rc-pass", password,
+            "--rc-user", user,
             "--user-agent", self._user_agent,
             "--use-json-log", "--color", "NEVER", "--log-level", "INFO",
         ]
@@ -519,6 +520,7 @@ class MountController(QObject):
             "\n"
             "[Service]\n"
             "Type=notify\n"
+            f"{rc_pass_env_line(creds[1])}\n"
             f"ExecStartPre=-{stop}\n"
             f"ExecStart={exec_start}\n"
             f"ExecStop={stop}\n"
@@ -568,7 +570,9 @@ class MountController(QObject):
 
         The unit text is ours (`unit_text`), so its ``ExecStart`` is the
         ``build_argv()`` tokens joined by single spaces with ``%`` doubled —
-        the three rc flags are single tokens and parse back exactly.
+        the rc flags are single tokens and parse back exactly. The password
+        lives on an ``Environment=`` line (`rc_pass_from_unit`), with the old
+        ``--rc-pass`` token still honoured for a unit written before that.
 
         Returns:
             The endpoint, also saved to `endpoints.json`, or ``None`` when
@@ -586,16 +590,17 @@ class MountController(QObject):
         tokens = [tok.replace("%%", "%") for tok in exec_start.split(" ")]
         flags: dict[str, str] = {}
         for i, tok in enumerate(tokens[:-1]):
-            if tok in ("--rc-addr", "--rc-user", "--rc-pass"):
+            if tok in ("--rc-addr", "--rc-user"):
                 flags[tok] = tokens[i + 1]
+        password = rc_pass_from_unit(text)
         addr = flags.get("--rc-addr", "")
         host, _, port_text = addr.rpartition(":")
         if not port_text.isdigit() or "--rc-user" not in flags \
-                or "--rc-pass" not in flags:
+                or password is None:
             return None
         ep = RcEndpoint(kind="mount", host=host or "127.0.0.1",
                         port=int(port_text), user=flags["--rc-user"],
-                        password=flags["--rc-pass"],
+                        password=password,
                         mountpoint=str(self.mountpoint(account)),
                         account_id=account.id)
         try:
